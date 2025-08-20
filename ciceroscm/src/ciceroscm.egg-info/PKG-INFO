@@ -1,0 +1,110 @@
+Metadata-Version: 2.4
+Name: ciceroscm
+Version: 0.0.0
+Summary: Python version of the CICERO-SCM simple climate model
+Author-email: Marit Sandstad <marit.sandstad@cicero.oslo.no>, Ragnhild Bieltvedt Skeie <r.b.skeie@cicero.oslo.no>, Ane Nordlie Johansen <ane.nordlie.johansen@cicero.oslo.no>, Benjamin Sanderson <benjamin.sanderson@cicero.oslo.no>
+Keywords: cicero-scm,cicero,python,repo,simple,climate,model
+Classifier: Development Status :: 4 - Beta
+Classifier: License :: OSI Approved :: Apache Software License
+Classifier: Intended Audience :: Developers
+Classifier: Operating System :: OS Independent
+Classifier: Programming Language :: Python :: 3.9
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Requires-Python: >=3.9
+Description-Content-Type: text/x-rst
+License-File: LICENSE
+Requires-Dist: click
+Requires-Dist: openscm_units>=0.5.0
+Requires-Dist: python-dotenv
+Requires-Dist: tqdm
+Requires-Dist: matplotlib>=3.4
+Requires-Dist: scipy
+Requires-Dist: numpy>=1.23
+Requires-Dist: pandas
+Provides-Extra: notebookss
+Requires-Dist: ipywidgets; extra == "notebookss"
+Requires-Dist: notebook; extra == "notebookss"
+Requires-Dist: seaborn; extra == "notebookss"
+Provides-Extra: tests
+Requires-Dist: codecov; extra == "tests"
+Requires-Dist: coverage; extra == "tests"
+Requires-Dist: nbval; extra == "tests"
+Requires-Dist: pytest-cov; extra == "tests"
+Requires-Dist: pytest>=4.0; extra == "tests"
+Requires-Dist: xlrd; extra == "tests"
+Provides-Extra: docs
+Requires-Dist: sphinx>=5; extra == "docs"
+Requires-Dist: sphinx_rtd_theme; extra == "docs"
+Requires-Dist: sphinx-click; extra == "docs"
+Provides-Extra: deploy
+Requires-Dist: twine>=1.11.0; extra == "deploy"
+Requires-Dist: setuptools>=41.2; extra == "deploy"
+Requires-Dist: wheel>=0.31.0; extra == "deploy"
+Provides-Extra: dev
+Requires-Dist: bandit; extra == "dev"
+Requires-Dist: black>=22.3.0; extra == "dev"
+Requires-Dist: black-nb; extra == "dev"
+Requires-Dist: flake8; extra == "dev"
+Requires-Dist: isort>5; extra == "dev"
+Requires-Dist: mypy; extra == "dev"
+Requires-Dist: nbdime; extra == "dev"
+Requires-Dist: pydocstyle[toml]; extra == "dev"
+Requires-Dist: pylint>=2.4.4; extra == "dev"
+Requires-Dist: ruff==0.8.6; extra == "dev"
+Requires-Dist: ciceroscm[deploy,docs,notebooks,tests]; extra == "dev"
+Dynamic: license-file
+
+ciceroscm
+==========
+
+A python version of the cicero-scm simple climate model
+
+License
+-------
+
+.. sec-begin-license
+Apache-2.0 license
+
+.. sec-end-license
+.. sec-begin-long-description
+
+Background
+----------
+This is the python version of the CICERO-SCM simple climate model/emulator.
+
+The Cicero Simple Climate model was first developed over 20 years ago and has been in use at Cicero with various updated ever since. Broadly speaking, it goes from global emissions to concentrations, to radiative forcing to global temperature change. The model can beshort circuited to start at any of these inputs, running directly from forcing or concentrations rather than all the way. However, for shortlived forcers, forcing is calculated directly from emisssions, so emissions need to be supplied even in a concentration driven run.
+
+The model includes a carbon cycle model introduced in a 1996 paper by Joos et al. The interplay between CO2, CH4 and N2O has been updated according to the 2016 work of Etminan et al. Otherwise, simplified impulse response functions take Tg emissions to concentrasions using lifetimes.
+
+Natural emissions of CH4 and N2O should be time variable and tuned in order to fit historical evolution.
+
+The forcing to temperature calculation is acheived via the 1992 Schlesinger upwelling diffusion model, calculating energy balance in a default set of 40 layered ocean with a box atmosphere for each hemisphere. Both forcing calculations and energy budget can be tuned using various user supplied parameters.
+
+Currently, this is a fairly faithful python rendering of the pre-existing fortran model, albeit with some added flexibility, some AR6 updates, and a couple of bugfixes.
+
+
+
+.. sec-end-long-description
+
+.. sec-begin-installation
+
+Installation
+------------
+CiceroSCM can not be installed via pip or conda yet.
+
+.. sec-end-installation
+
+Documentation
+-------------
+
+Documentation in docs folder not properly setup elsewhere yet.
+
+Contributing
+------------
+
+Please see the developement section of docs. At the moment only internal contributers.
+
+.. sec-begin-links
+
+.. sec-end-links

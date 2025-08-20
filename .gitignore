@@ -1,0 +1,4 @@
+data/*
+notebooks/lightning_logs
+notebooks/__pycache__
+src/__pycache__
