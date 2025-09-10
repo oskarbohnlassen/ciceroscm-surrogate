@@ -29,7 +29,7 @@ def format_results(results, scenarios):
     GASES    = scenarios[0]["emissions_data"].columns.tolist()
 
     temp_tbl = (
-        results[ results["variable"] == "Surface Air Temperature Change" ]
+        results[results["variable"] == "Surface Air Temperature Change"]
         .set_index("scenario")          
         .filter(regex=r"^\d")           # keep only year columns
         .astype(float))
