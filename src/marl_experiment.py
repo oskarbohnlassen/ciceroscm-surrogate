@@ -156,8 +156,8 @@ class ClimateMarlExperiment():
 
         Returns:
             trajectory: list of {agent_id -> action(list[int])} per step
-            per_agent_return: dict[agent_id -> float]  # sum of rewards
-            total_return: float                        # sum over all agents
+            per_agent_return: dict[agent_id -> float]
+            total_return: float
             episode_len: int
         """
         env = ClimateMARL(
@@ -167,10 +167,7 @@ class ClimateMarlExperiment():
             self.actions_config,
         )
 
-        if seed is not None:
-            obs, _ = env.reset(seed=seed)
-        else:
-            obs, _ = env.reset()
+        obs, _ = env.reset(seed=seed) if seed is not None else env.reset()
 
         done = False
         t = 0
@@ -178,27 +175,37 @@ class ClimateMarlExperiment():
         per_agent_return = {f"country_{i}": 0.0 for i in range(self.env_config["N"])}
         total_return = 0.0
 
+        # --- RNN state per agent (and per policy) ---
+        # RLlib LSTM expects a list [h, c] for TorchPolicy by default.
+        rnn_state = {}
+        for agent_id in obs.keys():
+            pol_id = policy_mapping_fn(agent_id)
+            pol = algo.get_policy(pol_id)
+            rnn_state[agent_id] = pol.get_initial_state()  # usually [h0, c0]
+
         while not done:
             actions, step_log = {}, {}
 
-            # deterministic greedy actions
             for agent_id, agent_obs in obs.items():
-                policy_id = policy_mapping_fn(agent_id)
-                policy = algo.get_policy(policy_id)
+                pol_id = policy_mapping_fn(agent_id)
+                pol = algo.get_policy(pol_id)
 
-                batched = {k: np.expand_dims(v, 0) for k, v in agent_obs.items()} \
-                        if isinstance(agent_obs, dict) else np.expand_dims(agent_obs, 0)
+                # Deterministic (greedy) action; pass the current RNN state.
+                # compute_single_action handles batching for you.
+                act, new_state, _ = pol.compute_single_action(
+                    agent_obs,
+                    state=rnn_state[agent_id],
+                    explore=False,
+                )
+                # Store next RNN state for this agent
+                rnn_state[agent_id] = new_state
 
-                act_batch, _, _ = policy.compute_actions(batched, explore=False)
-                act = np.asarray(act_batch[0], dtype=np.int64)
-
-                actions[agent_id] = act
-                step_log[agent_id] = act.tolist()
+                actions[agent_id] = np.asarray(act, dtype=np.int64)
+                step_log[agent_id] = np.asarray(act).tolist()
 
             trajectory.append(step_log)
             obs, rewards, terminated, truncated, _ = env.step(actions)
 
-            # accumulate undiscounted rewards
             for aid, r in rewards.items():
                 per_agent_return[aid] += float(r)
                 total_return += float(r)
@@ -276,13 +283,21 @@ class ClimateMarlExperiment():
             },
         )
         .training(     
-            model={"fcnet_hiddens": [64], "vf_share_layers": True},    
-            train_batch_size=32 * self.env_config["N"] * self.env_config["horizon"],  
-            minibatch_size=16 * self.env_config["N"] * self.env_config["horizon"],              
-            num_epochs=3,                  
+            model={
+                "use_lstm": True,
+                "lstm_cell_size": 64,
+                "max_seq_len": self.env_config["horizon"],   # or 32 if large
+                "vf_share_layers": True,
+            },
+            train_batch_size=16 * self.env_config["N"] * self.env_config["horizon"],  
+            minibatch_size=8 * self.env_config["N"] * self.env_config["horizon"],              
+            num_epochs=10,                  
             gamma=0.999,
-            lr=1e-4,
+            lr=3e-4,
+            clip_param=0.3,     # was 0.2
+            entropy_coeff=0.01, # encourage exploration
         )
+
         .multi_agent(policies=policies, policy_mapping_fn=policy_mapping_fn)
         .resources(num_gpus=1)     
         .env_runners(
@@ -341,7 +356,7 @@ def main():
     
     # Actions
     actions_config = {
-        "emission_actions": [-0.05, -0.03, 0.0, 0.03, 0.05],  # Deviation from baseline emission shares
+        "emission_actions": [-0.05, 0.0, 0.05],  # Deviation from baseline emission shares
         "prevention_actions": [0.0, 0.02, 0.08]
         }
 

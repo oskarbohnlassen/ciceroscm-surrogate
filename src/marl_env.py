@@ -84,46 +84,41 @@ class ClimateMARL(MultiAgentEnv):
         self.max_prevention_benefit = 0  # Maximum prevention can reduce 30% of disaster costs
         self.damage_exponent = 3  # Damages scale with T^damage_exponent
 
-        self.climate_base_cost = 200.0
-        self.prevention_base_cost = 500.0
-        self.reduction_base_cost = 1.0
+        self.climate_base_cost = 20.0
+        self.prevention_base_cost = 4000.0
+        self.reduction_base_cost = 10.0
         
         # --- actions ---
         self.emission_actions = np.asarray(actions_config['emission_actions'], dtype=np.float32)  # -5% to +5% emission changes
         self.prevention_actions = np.asarray(actions_config['prevention_actions'], dtype=np.float32)  # 0%, 2%, 5%, 8% of damage reduction
         self.prevention_stock = np.zeros(self.N, dtype=np.float32) # Current prevention stock (decays over time)
-        self.prevention_stock_obs = self.prevention_stock.copy()
         self._controllable_gases = 4  # first four indices
         self.last_agent_emissions = np.zeros(
             (self.N, self._controllable_gases), dtype=np.float32)
         self.cumulative_emission_delta = np.zeros(
             (self.N, self._controllable_gases), dtype=np.float32)  # running (actual - baseline)
         
-        self.last_emission_change = np.zeros(self.N, dtype=np.float32)
-        self.last_prevention_rate = np.zeros(self.N, dtype=np.float32)
-        
         self._act_space = spaces.MultiDiscrete([len(self.emission_actions), len(self.prevention_actions)])
+
+        first_year = float(np.mean(self.baseline_emissions[0][:self._controllable_gases]))
+        self._cum_scale = max(1.0, first_year * max(1, self.horizon))
+        self._emission_scale = max(1.0, float(np.mean(self.baseline_emissions[0][:self._controllable_gases])))
 
         # --- agents  ---
         self.agents = [f"country_{i}" for i in range(self.N)]
 
         # --- spaces ---
-        cumulative_bound = 5000.0  # generous cap for accumulated deviations from baseline
         obs_low = np.concatenate([
             np.array([0.0, 0.0], dtype=np.float32),
-            np.zeros(self.N * self._controllable_gases, dtype=np.float32),
-            np.full(self.N * self._controllable_gases, -cumulative_bound, dtype=np.float32),
-            np.zeros(self.N, dtype=np.float32),
-            np.full(self.N, -0.05, dtype=np.float32),  # emission deltas min
-            np.zeros(self.N, dtype=np.float32),         # prevention deltas min
+            np.zeros(self.N * self._controllable_gases, dtype=np.float32), # last emissions
+            np.full(self.N * self._controllable_gases, -100.0, dtype=np.float32), # large cumulative emissions
+            np.zeros(self.N, dtype=np.float32), # prevention stock cap
         ])
         obs_high = np.concatenate([
-            np.array([3.0, 40.0], dtype=np.float32),
-            np.full(self.N * self._controllable_gases, 1000.0, dtype=np.float32),
-            np.full(self.N * self._controllable_gases, cumulative_bound, dtype=np.float32),
-            np.ones(self.N, dtype=np.float32),          # prevention stock cap
-            np.full(self.N, 0.05, dtype=np.float32),    # emission deltas max
-            np.full(self.N, 0.08, dtype=np.float32),    # prevention deltas max
+            np.array([3.0, 1.0], dtype=np.float32),
+            np.full(self.N * self._controllable_gases, 100.0, dtype=np.float32), # last emissions
+            np.full(self.N * self._controllable_gases, 100.0, dtype=np.float32), # large cumulative emissions
+            np.ones(self.N, dtype=np.float32), # prevention stock cap
         ])
         self._obs_space = spaces.Box(obs_low, obs_high, dtype=np.float32)
         self.observation_spaces = {a: self._obs_space for a in self.agents}
@@ -194,18 +189,17 @@ class ClimateMARL(MultiAgentEnv):
     def _current_observation(self):
         temp = float(self.engine.T)
         year_idx = float(self.year_idx - (self.hist_end + 1))
-        emissions_flat = self.last_agent_emissions.flatten()
-        cumulative_flat = self.cumulative_emission_delta.flatten()
-        prevention_stock = self.prevention_stock
-        last_emission_change = self.last_emission_change.flatten()
-        last_prevention_rate = self.last_prevention_rate.flatten()
+        year_idx_norm = year_idx / 35 # normalize to [0..1] over 2016-2050
+
+        emissions_flat = (self.last_agent_emissions / self._emission_scale).flatten().astype(np.float32)
+        cumulative_flat = (self.cumulative_emission_delta / self._cum_scale).flatten().astype(np.float32)
+        prevention_stock = self.prevention_stock.astype(np.float32)
+
         obs_vec = np.concatenate([
-            np.array([temp, year_idx], dtype=np.float32),
-            emissions_flat.astype(np.float32),
-            cumulative_flat.astype(np.float32),
-            prevention_stock.astype(np.float32),
-            last_emission_change.astype(np.float32),
-            last_prevention_rate.astype(np.float32)
+            np.array([temp, year_idx_norm], dtype=np.float32),
+            emissions_flat,
+            cumulative_flat,
+            prevention_stock,
             ])
         
         #print(f"Obs vec: {obs_vec} \n")
@@ -220,8 +214,6 @@ class ClimateMARL(MultiAgentEnv):
         self.t = 0
         self.year_idx = self.hist_end + 1  # 2016
         self.prevention_stock.fill(0.0)
-        self.last_emission_change.fill(0.0)
-        self.last_prevention_rate.fill(0.0)
         self.cumulative_emission_delta.fill(0.0)
 
         baseline_global = self.baseline_emissions[0]
@@ -240,26 +232,21 @@ class ClimateMARL(MultiAgentEnv):
 
 
     def step(self, action_dict):
-        
-        # Parse separate actions for emission and mitigation
+
+        # Parse separate actions for emission and prevention
         emission_indices = np.array([action_dict[ag][0] for ag in self.agents], dtype=np.int32)
-        mitigation_indices = np.array([action_dict[ag][1] for ag in self.agents], dtype=np.int32)
+        prevention_indices = np.array([action_dict[ag][1] for ag in self.agents], dtype=np.int32)
 
         # Convert to actual values
         emission_changes = self.emission_actions[emission_indices]  # -5% to +5% emission changes
         #emission_changes = self.emission_actions[[0]*self.N]  # test
         # test where emissions are reduced max
-        prevention_rates = self.prevention_actions[mitigation_indices]  # 0%, 2%, 5%, 8% of damage reduction
+        prevention_rates = self.prevention_actions[prevention_indices]  # 0%, 2%, 5%, 8% of damage reduction
         #print(f"Emission changes: {emission_changes}, Prevention rates: {prevention_rates}")
-
-        self.last_emission_change[...] = emission_changes
-        self.last_prevention_rate[...] = prevention_rates
-        #print(f"Last emission changes: {self.last_emission_change}, Last prevention rates: {self.last_prevention_rate}")
 
         # Update prevention stock (decays over time)
         self.prevention_stock = (self.prevention_stock * self.prevention_decay) + prevention_rates
         self.prevention_stock = np.clip(self.prevention_stock, 0.0, self.max_prevention_benefit)
-        self.prevention_stock_obs = self.prevention_stock.copy()
         #print(f"Prevention stock: {self.prevention_stock}")
 
         # Baseline emissions allocation
@@ -292,21 +279,19 @@ class ClimateMARL(MultiAgentEnv):
         # (A) Climate disasters cost per agent
         base_disaster_cost = self.climate_base_cost * ((T_next+1) ** self.damage_exponent) # (T^3) scaling of damages
         agent_disaster_cost = base_disaster_cost * self.climate_disaster_sensitivity * (1-self.prevention_stock) # (N,)
-        #print(f"Disaster costs per agent: {agent_disaster_cost}")
 
         # (B) Climate reduction cost per agent
-        emission_reduction_action = np.maximum(0.0, -emission_changes) # fraction cut (0..0.05)
-        emission_reduction_action += (emission_reduction_action != 0).astype(float)
-        emission_reduction_cost = self.reduction_base_cost * self.emission_reduction_sensitivity * emission_reduction_action
-        #print(f"Reduction costs per agent: {emission_reduction_cost}")
+        cut = np.maximum(0.0, -emission_changes)  # 0..0.03
+        emission_reduction_cost = self.reduction_base_cost * self.emission_reduction_sensitivity * cut
 
         # (C) Climate prevention cost per agent
-        prevention_rates += (prevention_rates != 0).astype(float)
         prevention_cost = self.prevention_base_cost * self.climate_prevention_sensitivity * prevention_rates  # (N,)
-        #print(f"Prevention costs per agent: {prevention_cost}")
+
+        #print(f"All reward components: Disaster: {agent_disaster_cost}, Emission reduction: {emission_reduction_cost}, Prevention: {prevention_cost}")
 
         # Total reward
         r = - (agent_disaster_cost + emission_reduction_cost + prevention_cost)
+        r *= 1e-4
         #print(f"Rewards per agent: {r}")
         #print("-----------------------------------------------------")
 
@@ -317,6 +302,7 @@ class ClimateMARL(MultiAgentEnv):
         
         # Update observation
         obs_vec = self._current_observation()
+        #print(f"Obs vec: {obs_vec} \n")
         obs_d = {agent: obs_vec.copy() for agent in self.agents}
         
         # Additional info
