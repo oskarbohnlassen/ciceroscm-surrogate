@@ -150,10 +150,10 @@ class CICERONetEngine:
     use_half : bool
         Use float16 inside autocast; otherwise run in float32.
     """
-    def __init__(self, historical_emissions, model, device="cuda:0", window=50,
+    def __init__(self, historical_emissions, model, device="cuda:0",
                  mu=None, std=None, autocast=True, use_half=True):
 
-        self.W = int(window)
+        self.W = int(50)
         self.device = torch.device(device)
         self.model = model.eval().to(self.device)
         self.use_half = bool(use_half) and (self.device.type == "cuda")
