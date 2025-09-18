@@ -128,12 +128,6 @@ class ClimateMARL(MultiAgentEnv):
         self.net_params = env_config["net_params"]
         self.scm_params = env_config["scm_params"]
 
-        self.mu_gas = self.net_params['mu']
-        self.std_gas = self.net_params['std']
-
-        # --- timer ---
-        self._engine_time = 0.0
-
         # internal state
         self.reset()
 

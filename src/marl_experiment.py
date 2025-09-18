@@ -15,6 +15,7 @@ import pandas as pd
 import importlib
 import matplotlib.pyplot as plt
 from collections import defaultdict
+import json
 
 
 import warnings
@@ -226,6 +227,8 @@ class ClimateMarlExperiment():
         years = list(range(start_year, start_year + T))
 
         print(f"\nGreedy policy choices over {T} years ({years[0]}–{years[-1]}):")
+
+        policy_logger = {}
         for ag in agents:
             # Collect indices chosen each year
             em_idx = [int(step[ag][0]) for step in greedy_traj]
@@ -237,7 +240,10 @@ class ClimateMarlExperiment():
             print(f"- {ag}:")
             print("  Emission delta (%):  " + ", ".join(f"{v:.1f}" for v in em_series))
             print("  Prevention rate (%): " + ", ".join(f"{v:.1f}" for v in pr_series))
-            
+            policy_logger[ag] = {"emission_delta": em_series, "prevention_rate": pr_series}
+
+        return policy_logger
+
     def register_env_rl(self):
         def env_creator(cfg):
             # cfg is the single env_config RLlib passes.
@@ -286,50 +292,94 @@ class ClimateMarlExperiment():
             model={
                 "use_lstm": True,
                 "lstm_cell_size": 64,
-                "max_seq_len": self.env_config["horizon"],   # or 32 if large
+                "max_seq_len": self.env_config["horizon"],
                 "vf_share_layers": True,
             },
-            train_batch_size=16 * self.env_config["N"] * self.env_config["horizon"],  
-            minibatch_size=8 * self.env_config["N"] * self.env_config["horizon"],              
+            train_batch_size=8 * self.env_config["N"] * self.env_config["horizon"],  
+            minibatch_size=4 * self.env_config["N"] * self.env_config["horizon"],              
             num_epochs=10,                  
             gamma=0.999,
             lr=3e-4,
-            clip_param=0.3,     # was 0.2
-            entropy_coeff=0.01, # encourage exploration
+            clip_param=0.3,     
+            entropy_coeff=0.01,
         )
 
         .multi_agent(policies=policies, policy_mapping_fn=policy_mapping_fn)
         .resources(num_gpus=1)     
         .env_runners(
-                rollout_fragment_length=self.env_config["horizon"],
+                rollout_fragment_length='auto',
                 batch_mode="complete_episodes",
-                num_env_runners=2,
+                num_env_runners=1,
                 num_envs_per_env_runner=32,
                 num_gpus_per_env_runner=1,
+                sample_timeout_s=600,
             )
         )
         
         algo = base_config.build_algo()
 
+        ## Make folder in marl_results to save results
+        timestamp = time.strftime("%Y%m%d_%H%M%S", time.localtime())
+        model_engine = self.env_config["engine"]
+        folder_name = f"{timestamp}_{model_engine}"
+        results_dir = os.path.join("marl_results", folder_name)
+        os.makedirs(results_dir, exist_ok=False) # Make error if already exists
+        
+        num_iterations = 50
         num_env_steps = 0
-        for i in range(100):
+        per_agent_reward_logger_train = {}
+        per_agent_reward_logger_greedy = {}
+        per_agent_policy_logger_greedy = {}
+        training_time_stats = {}
+        t0 = time.time()
+        for i in range(num_iterations):
             result = algo.train()
             # Per-agent (per-policy) mean rewards
             per_agent_rewards = result["env_runners"]["policy_reward_mean"]
             num_env_steps += result["env_runners"]["episodes_timesteps_total"]
 
+            per_agent_reward_logger_train[num_env_steps] = per_agent_rewards
             print(f"Per-agent eval rewards at iteration: {i} after {num_env_steps} timesteps")
             for policy_id, mean_rew in per_agent_rewards.items():
                 print(f"  {policy_id}: {mean_rew:.4f}")    
             print(f"Timers:   {result['timers']}")
 
-            if i % 10 == 0:
+            if i % 2 == 0:
                 traj, agent_ret, total_ret, ep_len = self.rollout_greedy_actions(algo, policy_mapping_fn)
+                per_agent_reward_logger_greedy[num_env_steps] = agent_ret
+
                 print("[greedy] per-agent returns:", {k: round(v, 2) for k, v in agent_ret.items()})
-                print(f"[greedy] total return={total_ret:.2f}, episode length={ep_len}")
-                self.print_greedy_summary(traj)
-                
+                policy_logger = self.print_greedy_summary(traj)
+                per_agent_policy_logger_greedy[num_env_steps] = policy_logger
+
+            training_time_stats[num_env_steps] = time.time() - t0
             print("="*60)
+
+            if i % 10 == 0:
+                
+                # Collect all results
+                policy_reward_intermediate_dict = {
+                    "train_reward": per_agent_reward_logger_train,
+                    "greedy_reward": per_agent_reward_logger_greedy,
+                    "greedy_policy": per_agent_policy_logger_greedy,
+                    "training_time_stats": training_time_stats}
+                
+                # Save algo results in results_dir as json
+                with open(os.path.join(results_dir, "marl_experiment_results_intermediate.json"), "w") as f:
+                    json.dump(policy_reward_intermediate_dict, f, indent=4)
+
+        # Collect all results
+        policy_reward_dict = {
+            "train_reward": per_agent_reward_logger_train,
+            "greedy_reward": per_agent_reward_logger_greedy,
+            "greedy_policy": per_agent_policy_logger_greedy,
+            "training_time_stats": training_time_stats}
+        
+        # Save algo results in results_dir as json
+        with open(os.path.join(results_dir, "marl_experiment_results.json"), "w") as f:
+            json.dump(policy_reward_dict, f, indent=4)
+
+
 
 def main():
     # Load base data
@@ -340,7 +390,7 @@ def main():
 
     # Env config
     env_config = {"N": 4, 
-                        "engine": "net", 
+                        "engine": "scm", 
                         "horizon": 35, 
                         "G": 40, 
                         "hist_end": 2015, 
