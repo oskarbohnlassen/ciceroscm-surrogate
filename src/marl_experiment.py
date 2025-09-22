@@ -321,7 +321,7 @@ class ClimateMarlExperiment():
         ## Make folder in marl_results to save results
         timestamp = time.strftime("%Y%m%d_%H%M%S", time.localtime())
         model_engine = self.env_config["engine"]
-        folder_name = f"{timestamp}_{model_engine}"
+        folder_name = f"{timestamp}_{model_engine}_heterogeneous"
         results_dir = os.path.join("marl_results", folder_name)
         os.makedirs(results_dir, exist_ok=False) # Make error if already exists
         
@@ -390,7 +390,7 @@ def main():
     baseline_emission_growth = growth_base.replace([np.inf, -np.inf], np.nan).fillna(1.0).loc[2015+1:]
     historical_emissions = em_data.loc[:2015]
     baseline_emissions = em_data.loc[2015:]
-    emission_shares = np.tile(np.array([0.25, 0.25, 0.25, 0.25]), (40, 1)).T
+    emission_shares = np.tile(np.array([0.05, 0.5, 0.1, 0.35]), (40, 1)).T
 
     # Env config
     env_config = {"N": 4, 
@@ -403,9 +403,9 @@ def main():
 
     # Economic parameters per country
     economics_config = {
-        "climate_disaster_sensitivity":       [1.00, 1.00, 1.00, 1.00],  # cost of climate change per temperature increase (per country)
-        "emission_reduction_sensitivity":     [1.00, 1.00, 1.00, 1.00],  # cost of having lower emissions (per country)
-        "climate_prevention_sensitivity":     [1.00, 1.00, 1.00, 1.00],  # cost of mitigation technologies (per country)
+        "climate_disaster_sensitivity":       [3.00, 0.20, 0.05, 1.00],  # cost of climate change per temperature increase (per country)
+        "emission_reduction_sensitivity":     [2.00, 10.00, 10.00, 1.00],  # cost of having lower emissions (per country)
+        "climate_prevention_sensitivity":     [1.00, 1.00, 1.00, 10.00],  # cost of mitigation technologies (per country)
         }
     
     # Actions

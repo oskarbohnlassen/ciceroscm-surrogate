@@ -83,7 +83,7 @@ class ClimateMARL(MultiAgentEnv):
         self.climate_prevention_sensitivity   = np.asarray(economics_config['climate_prevention_sensitivity'], dtype=np.float32)   # (N,)
 
         self.prevention_decay = 0.95  # Each year the prevention stock decays by 5%
-        self.max_prevention_benefit = 0  # Maximum prevention 
+        self.max_prevention_benefit = 0.4  # Maximum prevention 
         self.damage_exponent = 3  # Damages scale with T^damage_exponent
 
         self.climate_base_cost = 40.0
