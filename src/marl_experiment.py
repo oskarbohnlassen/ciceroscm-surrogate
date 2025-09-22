@@ -325,7 +325,7 @@ class ClimateMarlExperiment():
         results_dir = os.path.join("marl_results", folder_name)
         os.makedirs(results_dir, exist_ok=False) # Make error if already exists
         
-        num_iterations = 100
+        num_iterations = 70
         num_env_steps = 0
         per_agent_reward_logger_train = {}
         per_agent_reward_logger_greedy = {}
@@ -394,7 +394,7 @@ def main():
 
     # Env config
     env_config = {"N": 4, 
-                        "engine": "scm", 
+                        "engine": "net", 
                         "horizon": 35, 
                         "G": 40, 
                         "hist_end": 2015, 

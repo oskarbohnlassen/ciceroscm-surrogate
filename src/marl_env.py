@@ -235,7 +235,7 @@ class ClimateMARL(MultiAgentEnv):
         # Parse separate actions for emission and prevention
         emission_indices = np.array([action_dict[ag][0] for ag in self.agents], dtype=np.int32)
         prevention_indices = np.array([action_dict[ag][1] for ag in self.agents], dtype=np.int32)
-        emission_changes = self.emission_actions[emission_indices]  # -5% to +5% emission changes
+        emission_changes = self.emission_actions[emission_indices]  # -4% to +4% emission changes
         prevention_rates = self.prevention_actions[prevention_indices]  # 0%, 2%, 5%, 8% of damage reduction    
         
         # Prevention
@@ -261,8 +261,8 @@ class ClimateMARL(MultiAgentEnv):
 
         # Step climate engine
         T_next = self.engine.step(emission_global)
-        #print(f"SCM engine temperature: {T_next}")
-        #T_next = self.net_engine.step(emission_global)
+      #  print(f"SCM engine temperature: {T_next}")
+       # T_next = self.net_engine.step(emission_global)
         #print(f"Net engine temperature: {T_next}")
     
         # (A) Climate disasters cost per agent
@@ -270,7 +270,7 @@ class ClimateMARL(MultiAgentEnv):
         agent_disaster_cost = base_disaster_cost * self.climate_disaster_sensitivity * (1-self.prevention_stock) # (N,)
 
         # (B) Climate reduction cost per agent
-        cut = np.maximum(0.0, -emission_changes)  # 0..0.03
+        cut = np.maximum(0.0, -emission_changes)  
         emission_reduction_cost = self.reduction_base_cost * self.emission_reduction_sensitivity * cut
 
         # (C) Climate prevention cost per agent
