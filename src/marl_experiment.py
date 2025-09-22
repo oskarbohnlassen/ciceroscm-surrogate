@@ -205,7 +205,7 @@ class ClimateMarlExperiment():
                 step_log[agent_id] = np.asarray(act).tolist()
 
             trajectory.append(step_log)
-            obs, rewards, terminated, truncated, _ = env.step(actions)
+            obs, rewards, terminated, truncated, info_dict = env.step(actions)
 
             for aid, r in rewards.items():
                 per_agent_return[aid] += float(r)
@@ -214,7 +214,7 @@ class ClimateMarlExperiment():
             done = terminated.get("__all__", False) or truncated.get("__all__", False)
             t += 1
 
-        return trajectory, per_agent_return, total_return, t
+        return trajectory, per_agent_return, total_return, t, obs
 
     def print_greedy_summary(self, greedy_traj):
         # Map indices -> actual values
@@ -325,7 +325,7 @@ class ClimateMarlExperiment():
         results_dir = os.path.join("marl_results", folder_name)
         os.makedirs(results_dir, exist_ok=False) # Make error if already exists
         
-        num_iterations = 50
+        num_iterations = 100
         num_env_steps = 0
         per_agent_reward_logger_train = {}
         per_agent_reward_logger_greedy = {}
@@ -345,9 +345,8 @@ class ClimateMarlExperiment():
             print(f"Timers:   {result['timers']}")
 
             if i % 2 == 0:
-                traj, agent_ret, total_ret, ep_len = self.rollout_greedy_actions(algo, policy_mapping_fn)
+                traj, agent_ret, total_ret, ep_len, obs_log = self.rollout_greedy_actions(algo, policy_mapping_fn)
                 per_agent_reward_logger_greedy[num_env_steps] = agent_ret
-
                 print("[greedy] per-agent returns:", {k: round(v, 2) for k, v in agent_ret.items()})
                 policy_logger = self.print_greedy_summary(traj)
                 per_agent_policy_logger_greedy[num_env_steps] = policy_logger
@@ -362,7 +361,8 @@ class ClimateMarlExperiment():
                     "train_reward": per_agent_reward_logger_train,
                     "greedy_reward": per_agent_reward_logger_greedy,
                     "greedy_policy": per_agent_policy_logger_greedy,
-                    "training_time_stats": training_time_stats}
+                    "training_time_stats": training_time_stats,
+                    }
                 
                 # Save algo results in results_dir as json
                 with open(os.path.join(results_dir, "marl_experiment_results_intermediate.json"), "w") as f:
@@ -373,7 +373,8 @@ class ClimateMarlExperiment():
             "train_reward": per_agent_reward_logger_train,
             "greedy_reward": per_agent_reward_logger_greedy,
             "greedy_policy": per_agent_policy_logger_greedy,
-            "training_time_stats": training_time_stats}
+            "training_time_stats": training_time_stats,
+            }
         
         # Save algo results in results_dir as json
         with open(os.path.join(results_dir, "marl_experiment_results.json"), "w") as f:
@@ -384,8 +385,11 @@ class ClimateMarlExperiment():
 def main():
     # Load base data
     gaspam_data, conc_data, em_data, nat_ch4_data, nat_n2o_data = load_core_data()
+    shifted = em_data.shift(1)
+    growth_base = em_data.divide(shifted.replace(0, np.nan))
+    baseline_emission_growth = growth_base.replace([np.inf, -np.inf], np.nan).fillna(1.0).loc[2015+1:]
     historical_emissions = em_data.loc[:2015]
-    baseline_emissions = em_data.loc[2015+1:]
+    baseline_emissions = em_data.loc[2015:]
     emission_shares = np.tile(np.array([0.25, 0.25, 0.25, 0.25]), (40, 1)).T
 
     # Env config
@@ -406,7 +410,7 @@ def main():
     
     # Actions
     actions_config = {
-        "emission_actions": [-0.05, 0.0, 0.05],  # Deviation from baseline emission shares
+        "emission_actions": [-0.04, 0.0, 0.04],  # Deviation from baseline emission shares
         "prevention_actions": [0.0, 0.02, 0.08]
         }
 
@@ -414,6 +418,7 @@ def main():
         "historical_emissions": historical_emissions,
         "baseline_emissions": baseline_emissions,
         "emission_shares": emission_shares,
+        "baseline_emission_growth": baseline_emission_growth,
         "gaspam_data": gaspam_data,
         "conc_data": conc_data,
         "nat_ch4_data": nat_ch4_data,

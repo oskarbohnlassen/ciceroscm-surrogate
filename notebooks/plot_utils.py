@@ -35,15 +35,17 @@ def plot_temperature_sequences(
 
     # Plot
     plt.figure(figsize=(6, 3))
-    cmap = plt.get_cmap("tab10")
+    cmap = plt.get_cmap("tab:cyan")
     for i, k in enumerate(idx):
         col = cmap(i)
         plt.plot(x, Y_true[k], color=col, lw=2.0, alpha = 0.5, label=f"S{i+1} — True")
         plt.plot(x, Y_pred[k], color=col, lw=1.6, ls="--", label=f"S{i+1} — Pred")
 
-    plt.xlabel("Year")
-    plt.ylabel("Air Temperature Change (°K)")
-    plt.legend(frameon=True, fontsize=8, ncol=3, loc = "upper left")
+    plt.xlabel("Year", fontsize = 14)
+    plt.ylabel("Air Temperature Change (°K)", fontsize = 14)
+    plt.legend(frameon=True, fontsize=12, ncol=3, loc = "upper left")
+    plt.xticks(fontsize = 12)
+    plt.yticks(fontsize = 12)
     plt.tight_layout()
 
     if savepath:
