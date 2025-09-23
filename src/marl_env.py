@@ -83,12 +83,12 @@ class ClimateMARL(MultiAgentEnv):
         self.climate_prevention_sensitivity   = np.asarray(economics_config['climate_prevention_sensitivity'], dtype=np.float32)   # (N,)
 
         self.prevention_decay = 0.95  # Each year the prevention stock decays by 5%
-        self.max_prevention_benefit = 0.4  # Maximum prevention 
+        self.max_prevention_benefit = 0  # Maximum prevention 
         self.damage_exponent = 3  # Damages scale with T^damage_exponent
 
-        self.climate_base_cost = 40.0
-        self.prevention_base_cost = 2000.0
-        self.reduction_base_cost = 10.0
+        self.climate_base_cost = 2.0
+        self.prevention_base_cost = 10.0
+        self.reduction_base_cost = 1.0
         
         self._controllable_gases = 4  # first four indices
         self.gas_slice = slice(0, self._controllable_gases)
@@ -261,8 +261,8 @@ class ClimateMARL(MultiAgentEnv):
 
         # Step climate engine
         T_next = self.engine.step(emission_global)
-      #  print(f"SCM engine temperature: {T_next}")
-       # T_next = self.net_engine.step(emission_global)
+        #print(f"SCM engine temperature: {T_next}")
+        #T_next = self.net_engine.step(emission_global)
         #print(f"Net engine temperature: {T_next}")
     
         # (A) Climate disasters cost per agent
@@ -287,8 +287,8 @@ class ClimateMARL(MultiAgentEnv):
         # Update time 
         self.t += 1
         self.year_idx += 1
-        done = (self.t >= self.horizon) or (self.year_idx > self.future_end)
-        
+        done = (self.t >= self.horizon) or (self.year_idx > self.future_end)                                       
+
         # Update observation
         obs_vec = self._current_observation()
         #print(f"Obs vec: {obs_vec} \n")

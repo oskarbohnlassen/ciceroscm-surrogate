@@ -297,11 +297,13 @@ class ClimateMarlExperiment():
             },
             train_batch_size=8 * self.env_config["N"] * self.env_config["horizon"],  
             minibatch_size=4 * self.env_config["N"] * self.env_config["horizon"],              
-            num_epochs=10,                  
+            num_epochs=5,                  
             gamma=0.999,
             lr=3e-4,
-            clip_param=0.3,     
+            lr_schedule=[[0, 3e-4], [50_000, 2e-4], [150_000, 1e-4], [200_000, 5e-5]],
+            clip_param=0.2,     
             entropy_coeff=0.01,
+            entropy_coeff_schedule=[[0, 0.01], [100_000, 0.003], [150_000, 0.001], [200_000, 0.0001]],
         )
 
         .multi_agent(policies=policies, policy_mapping_fn=policy_mapping_fn)
@@ -321,11 +323,11 @@ class ClimateMarlExperiment():
         ## Make folder in marl_results to save results
         timestamp = time.strftime("%Y%m%d_%H%M%S", time.localtime())
         model_engine = self.env_config["engine"]
-        folder_name = f"{timestamp}_{model_engine}_heterogeneous"
+        folder_name = f"{timestamp}_{model_engine}_homogeneous"
         results_dir = os.path.join("marl_results", folder_name)
         os.makedirs(results_dir, exist_ok=False) # Make error if already exists
         
-        num_iterations = 70
+        num_iterations = 100
         num_env_steps = 0
         per_agent_reward_logger_train = {}
         per_agent_reward_logger_greedy = {}
@@ -390,11 +392,11 @@ def main():
     baseline_emission_growth = growth_base.replace([np.inf, -np.inf], np.nan).fillna(1.0).loc[2015+1:]
     historical_emissions = em_data.loc[:2015]
     baseline_emissions = em_data.loc[2015:]
-    emission_shares = np.tile(np.array([0.05, 0.5, 0.1, 0.35]), (40, 1)).T
+    emission_shares = np.tile(np.array([0.25, 0.25, 0.25, 0.25]), (40, 1)).T
 
     # Env config
     env_config = {"N": 4, 
-                        "engine": "net", 
+                        "engine": "scm", 
                         "horizon": 35, 
                         "G": 40, 
                         "hist_end": 2015, 
@@ -403,15 +405,15 @@ def main():
 
     # Economic parameters per country
     economics_config = {
-        "climate_disaster_sensitivity":       [3.00, 0.20, 0.05, 1.00],  # cost of climate change per temperature increase (per country)
-        "emission_reduction_sensitivity":     [2.00, 10.00, 10.00, 1.00],  # cost of having lower emissions (per country)
-        "climate_prevention_sensitivity":     [1.00, 1.00, 1.00, 10.00],  # cost of mitigation technologies (per country)
+        "climate_disaster_sensitivity":       [1.00, 1.00, 1.00, 1.00],  # cost of climate change per temperature increase (per country)
+        "emission_reduction_sensitivity":     [1.00, 1.00, 1.00, 1.00],  # cost of having lower emissions (per country)
+        "climate_prevention_sensitivity":     [1.00, 1.00, 1.00, 1.00],  # cost of mitigation technologies (per country)
         }
     
     # Actions
     actions_config = {
         "emission_actions": [-0.04, 0.0, 0.04],  # Deviation from baseline emission shares
-        "prevention_actions": [0.0, 0.02, 0.08]
+        "prevention_actions": [0.0, 0.03, 0.08]
         }
 
     emission_data = {
