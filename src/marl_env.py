@@ -83,12 +83,7 @@ class ClimateMARL(MultiAgentEnv):
         self.climate_prevention_sensitivity   = np.asarray(economics_config['climate_prevention_sensitivity'], dtype=np.float32)   # (N,)
 
         self.prevention_decay = 0.95  # Each year the prevention stock decays by 5%
-        self.max_prevention_benefit = 0  # Maximum prevention 
-        self.damage_exponent = 3  # Damages scale with T^damage_exponent
-
-        self.climate_base_cost = 2.0
-        self.prevention_base_cost = 10.0
-        self.reduction_base_cost = 1.0
+        self.max_prevention_benefit = 0.5  # Maximum prevention 
         
         self._controllable_gases = 4  # first four indices
         self.gas_slice = slice(0, self._controllable_gases)
@@ -165,7 +160,7 @@ class ClimateMARL(MultiAgentEnv):
         state = {k: torch.from_numpy(arr).to(device) for k, arr in p["state_dict_np"].items()}
 
         # Initialize model
-        m = LSTMSurrogate(n_gas=40, hidden=128, num_layers=1).to(device)
+        m = LSTMSurrogate(n_gas=40, hidden=256, num_layers=2).to(device)
         m.load_state_dict(state, strict=True)
         m.eval()
         for param in m.parameters():
@@ -184,7 +179,7 @@ class ClimateMARL(MultiAgentEnv):
     def _current_observation(self):
         temp = float(self.engine.T)
         year_idx = float(self.year_idx - (self.hist_end + 1))
-        year_idx_norm = year_idx / 35 # normalize to [0..1] over 2016-2050
+        year_idx_norm = year_idx / self.horizon # normalize to [0..1]
 
         self.last_controlled_emissions = self.last_agent_emissions[:, self.gas_slice]
 
@@ -206,7 +201,8 @@ class ClimateMARL(MultiAgentEnv):
         if seed is not None:
             _ = np.random.default_rng(seed)
         
-        #print(f"Last emission changes: {self.last_emission_change}, Last prevention rates: {self.last_prevention_rate}")
+        self._temp_log = []
+
 
         self.t = 0
         self.year_idx = self.hist_end + 1  # 2016
@@ -235,8 +231,8 @@ class ClimateMARL(MultiAgentEnv):
         # Parse separate actions for emission and prevention
         emission_indices = np.array([action_dict[ag][0] for ag in self.agents], dtype=np.int32)
         prevention_indices = np.array([action_dict[ag][1] for ag in self.agents], dtype=np.int32)
-        emission_changes = self.emission_actions[emission_indices]  # -4% to +4% emission changes
-        prevention_rates = self.prevention_actions[prevention_indices]  # 0%, 2%, 5%, 8% of damage reduction    
+        emission_changes = self.emission_actions[emission_indices]  # -4%, 0%, +4% emission changes
+        prevention_rates = self.prevention_actions[prevention_indices]  # 0%, 3%, 8% of damage reduction    
         
         # Prevention
         self.prevention_stock = (self.prevention_stock * self.prevention_decay) + prevention_rates
@@ -261,44 +257,76 @@ class ClimateMARL(MultiAgentEnv):
 
         # Step climate engine
         T_next = self.engine.step(emission_global)
-        #print(f"SCM engine temperature: {T_next}")
-        #T_next = self.net_engine.step(emission_global)
-        #print(f"Net engine temperature: {T_next}")
+        # print(f"SCM engine temperature: {T_next}")
+        # T_next = self.net_engine.step(emission_global)
+        # print(f"Net engine temperature: {T_next}")
+
+        self._temp_log.append(T_next)
     
         # (A) Climate disasters cost per agent
-        base_disaster_cost = self.climate_base_cost * ((T_next+1) ** self.damage_exponent) # (T^3) scaling of damages
-        agent_disaster_cost = base_disaster_cost * self.climate_disaster_sensitivity * (1-self.prevention_stock) # (N,)
+        global_climate_cost_denominator_x = 0.003 * (T_next ** 2)
+        global_climate_cost = (global_climate_cost_denominator_x / (1.0 + global_climate_cost_denominator_x))
+        agent_disaster_cost = global_climate_cost * self.climate_disaster_sensitivity * (1-self.prevention_stock) # (N,)
 
         # (B) Climate reduction cost per agent
         cut = np.maximum(0.0, -emission_changes)  
-        emission_reduction_cost = self.reduction_base_cost * self.emission_reduction_sensitivity * cut
+        emission_reduction_cost = self.emission_reduction_sensitivity * cut
 
         # (C) Climate prevention cost per agent
-        prevention_cost = self.prevention_base_cost * self.climate_prevention_sensitivity * prevention_rates  # (N,)
+        prevention_cost = self.climate_prevention_sensitivity * prevention_rates  # (N,)
 
         #print(f"All reward components: Disaster: {agent_disaster_cost}, Emission reduction: {emission_reduction_cost}, Prevention: {prevention_cost}")
 
         # Total reward
         r = - (agent_disaster_cost + emission_reduction_cost + prevention_cost)
-        r *= 1e-3
+        r *= 1e-1
         #print(f"Rewards per agent: {r}")
         #print("-----------------------------------------------------")
 
         # Update time 
         self.t += 1
         self.year_idx += 1
-        done = (self.t >= self.horizon) or (self.year_idx > self.future_end)                                       
+        done = (self.t >= self.horizon) or (self.year_idx > self.future_end)    
 
         # Update observation
         obs_vec = self._current_observation()
         #print(f"Obs vec: {obs_vec} \n")
-        obs_d = {agent: obs_vec.copy() for agent in self.agents}
-        
+        obs_d = {agent: obs_vec.copy() for agent in self.agents}      
+        info_d = {a: {} for a in self.agents}
+
+        if done:
+            terminal_damage = np.zeros(self.N, dtype=np.float32)
+
+            for year_ahead_idx in range(5):
+                idx += 1
+                baseline_growth_year = self.baseline_emission_growth[idx] # 2016..2050 as baseline growth starts from 2016
+                baseline_growth_per_agent = np.broadcast_to(baseline_growth_year, (self.N, self.G)).copy()
+
+                emission_agents = self.last_agent_emissions * baseline_growth_per_agent 
+                emission_agents[:, self.gas_slice] = np.clip(emission_agents[:, self.gas_slice], 0.0, None)
+                emission_global = emission_agents.sum(axis=0)  # (G,)
+                self.last_agent_emissions[...] = emission_agents
+
+                T_next = self.engine.step(emission_global)
+                # print(f"TERMINAL: SCM engine temperature: {T_next}")
+                # T_next = self.net_engine.step(emission_global)
+                # print(f"TERMINAL: Net engine temperature: {T_next}")
+                self._temp_log.append(T_next)
+
+                global_climate_cost_denominator_x = 0.003 * (T_next ** 2)
+                global_climate_cost = (global_climate_cost_denominator_x / (1.0 + global_climate_cost_denominator_x))
+                agent_disaster_cost = global_climate_cost * self.climate_disaster_sensitivity * (1-self.prevention_stock) # (N,)
+                terminal_damage += agent_disaster_cost * 1e-1
+
+            r = r - terminal_damage
+            for a in self.agents:
+                info_d[a] = {"Temperature_trajectory": self._temp_log}
+                    
         # Additional info
         rew_d   = {a: float(x) for a, x in zip(self.agents, r)}
         term_d  = {a: done for a in self.agents}
         trunc_d = {a: False for a in self.agents}
-        info_d = {}
+
 
         term_d["__all__"]  = done
         trunc_d["__all__"] = False

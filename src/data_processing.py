@@ -3,11 +3,13 @@ import numpy as np
 import pickle
 from sklearn.model_selection import train_test_split
 
+from tqdm.auto import tqdm
 
-run_id = "20250805_152136"
+
+run_id = "20250926_110035"
 
 em_data_policy = 2015
-WINDOW   = 50
+WINDOW = 65
 data_output_dir = "/home/obola/repositories/cicero-scm-surrogate/data/"
 data_output_dir_run = os.path.join(data_output_dir, run_id)
 
@@ -46,9 +48,16 @@ def format_results(results, scenarios):
         scen_trainval, test_size=val_prop_within_trainval, random_state=0, shuffle=True
     )
 
-    def generate_machine_learning_data(scenario_list):
+    def generate_machine_learning_data(scenario_list, split_name):
         X_list, y_list = [], []
-        for scen in scenario_list:
+        scenario_iter = tqdm(
+            scenario_list,
+            desc=f"{split_name.capitalize()} scenarios",
+            unit="scenario",
+            leave=False,
+        )
+
+        for scen in scenario_iter:
             name  = scen["scenname"]
             em_df = scen["emissions_data"]      
             years = em_df.index     
@@ -62,7 +71,7 @@ def format_results(results, scenarios):
 
                 hist = em_df.loc[t_target-WINDOW : t_target-1, GASES].to_numpy()
                 next_em  = em_df.loc[t_target, GASES].to_numpy()
-                X_sample = np.vstack([hist, next_em[None, :]]).astype("float32")  # (51,G)
+                X_sample = np.vstack([hist, next_em[None, :]]).astype("float32")  # (W+1,G)
                 y      = np.float32(T_air[t_idx+1])                             # scalar
 
                 X_list.append(X_sample)
@@ -74,9 +83,9 @@ def format_results(results, scenarios):
         return X, y
     
     # ---- Create datasets for each split ----
-    X_train, y_train = generate_machine_learning_data(scen_train)
-    X_val, y_val     = generate_machine_learning_data(scen_val)
-    X_test, y_test   = generate_machine_learning_data(scen_test)
+    X_train, y_train = generate_machine_learning_data(scen_train, "train")
+    X_val, y_val     = generate_machine_learning_data(scen_val, "validation")
+    X_test, y_test   = generate_machine_learning_data(scen_test, "test")
 
     return (X_train, y_train, X_val, y_val, X_test, y_test, scen_train, scen_val, scen_test)
 

@@ -52,7 +52,7 @@ em_data_policy = 2015
 
 
 def load_ml_data_model():
-    run_dir = "/home/obola/repositories/cicero-scm-surrogate/data/20250805_152136"
+    run_dir = "/home/obola/repositories/cicero-scm-surrogate/data/20250926_110035"
     data_dir = os.path.join(run_dir, "processed")
     device = "cuda:0"
 
@@ -60,10 +60,10 @@ def load_ml_data_model():
     X_train, y_train, X_val, y_val, X_test, y_test = load_processed_data(data_dir)
     train_loader, val_loader, test_loader, G = format_data(X_train, y_train, X_val, y_val, X_test, y_test)
 
-    model = LSTMSurrogate(n_gas=G, hidden=128, num_layers=1).to(device)
+    model = LSTMSurrogate(n_gas=G, hidden=256, num_layers=2).to(device)
 
     # Load model parameters
-    model_dir = os.path.join(run_dir, "model_lstm.pth")
+    model_dir = os.path.join(run_dir, "model_lstm_v1.pth")
     model.load_state_dict(torch.load(model_dir, map_location=device, weights_only=False))
 
     return train_loader, val_loader, test_loader, model
@@ -99,7 +99,6 @@ def run_ml_inference(model, rl_loader, device = "cuda:0"):
     model.eval().to(device)
 
     # The data we need
-    preds = []
     latencies = []
 
     ## WARM UP
@@ -127,7 +126,7 @@ def run_ml_inference(model, rl_loader, device = "cuda:0"):
 
  
 def load_cicero_data():
-    scenario_path = "/home/obola/repositories/cicero-scm-surrogate/data/20250805_152136/raw/scenarios.pkl"
+    scenario_path = "/home/obola/repositories/cicero-scm-surrogate/data/20250926_110035/raw/scenarios.pkl"
     scenarios = pickle.load(open(scenario_path, "rb"))
 
     return scenarios
@@ -137,7 +136,7 @@ def format_cicero_data_into_rl(scenarios):
     rl_scenarios = []
     for scenario in scenarios:
         em_data = scenario['emissions_data'].copy()
-        for policy_year in range(2015,2051):
+        for policy_year in range(2015,2066):
             em_data_new = em_data.loc[:policy_year].copy()
             new_scenario = scenario.copy() 
             new_scenario['emissions_data'] = em_data_new
@@ -172,8 +171,6 @@ def main():
     print(f"Num experiment surrogate cuda: {len(surrogate_latencies_cuda)}")
     np.savez("surrogate_latencies_cuda.npz", surrogate_latencies_cuda)
 
-    train_loader, val_loader, test_loader, model = load_ml_data_model()
-    rl_loader = format_ml_data_to_rl(train_loader, val_loader, test_loader, shuffle=False)
     surrogate_latencies_cpu = run_ml_inference(model, rl_loader, device="cpu")
 
     print(f"Mean latency surrogate cpu: {np.mean(surrogate_latencies_cpu)}")

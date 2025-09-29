@@ -4,6 +4,7 @@ import pickle
 import numpy as np
 import pandas as pd
 import time
+from tqdm.auto import tqdm
 
 sys.path.insert(0,os.path.join(os.getcwd(), '../ciceroscm/', 'src'))
 
@@ -39,15 +40,15 @@ conc_data_last = 2100
 
 em_data_start = 1900
 em_data_policy = 2015
-em_data_end = 2050
+em_data_end = 2075
 
 tight_bounds = (0.995, 1.005)
 
 loose_bounds = {
-    "CO2_FF":   (0.95, 1.05),
-    "CO2_AFOLU":(0.95, 1.05),
-    "CH4":      (0.95, 1.05),
-    "N2O":      (0.95, 1.05)
+    "CO2_FF":   (0.925, 1.075),
+    "CO2_AFOLU":(0.925, 1.075),
+    "CH4":      (0.925, 1.075),
+    "N2O":      (0.925, 1.075)
 }
 
 test_data_dir = "/home/obola/repositories/cicero-scm-surrogate/ciceroscm/tests/test-data"
@@ -55,7 +56,7 @@ data_output_dir = "/home/obola/repositories/cicero-scm-surrogate/data/"
 run_id = time.strftime("%Y%m%d_%H%M%S")
 data_output_dir_run = os.path.join(data_output_dir, run_id)
 
-num_scenarios = 10000
+num_scenarios = 20000
 
 def load_core_data():
     gaspam_data = input_handler.read_components(
@@ -86,14 +87,27 @@ def generate_emission_policies(em_data, nat_ch4_data, nat_n2o_data, gaspam_data,
 
     scenarios = []
 
-    for k in range(num_scenarios):
-        rng   = np.random.default_rng(seed=k)        # reproducible
-        
-        delta = np.empty((len(years_future), len(gas_cols)), dtype=float)
+    scenario_iter = tqdm(
+        range(num_scenarios),
+        desc="Generating scenarios",
+        unit="scenario",
+        leave=False,
+    )
 
+    for k in scenario_iter:
+        rng   = np.random.default_rng(seed=k)        # reproducible
+        delta = np.empty((len(years_future), len(gas_cols)), dtype=float)
+        
+        # Smooth the deltas to avoid abrupt changes
         for j, gas in enumerate(gas_cols):
             lo, hi = loose_bounds.get(gas, tight_bounds)        # pick bounds
             delta[:, j] = rng.uniform(lo, hi, size=len(years_future))
+            # Smooth the deltas (EMA in log-space, alpha=0.7 as an example)
+            u = np.log1p(delta[:, j])                          # log(1+d)
+            for t in range(1, len(u)):
+                u[t] = 0.7 * u[t-1] + 0.3 * u[t]               # EMA smoothing
+            delta[:, j] = np.expm1(u)                          # back to % growth
+
 
         scale_df = pd.DataFrame(delta, index=years_future, columns=gas_cols)
 
@@ -110,10 +124,10 @@ def generate_emission_policies(em_data, nat_ch4_data, nat_n2o_data, gaspam_data,
             "concentrations_data": conc_data,
             "nat_ch4_data": nat_ch4_data,
             "nat_n2o_data": nat_n2o_data,
-            "emissions_data": em_policy,      
+            "emissions_data": em_policy,
             "udir": test_data_dir,
             "idtm": 24,
-            "scenname": f"rw_growth±5pct_{k:03d}",
+            "scenname": f"rw_growth_smooth_{k:03d}",
         }
         scenarios.append(new_scen)
 
@@ -142,7 +156,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
-

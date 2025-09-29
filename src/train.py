@@ -11,11 +11,11 @@ project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, project_root)
 
 from src.utils import validation_metrics
-from src.model import GRUSurrogate, LSTMSurrogate
+from src.model import GRUSurrogate, LSTMSurrogate, TCNForecaster
 
 EPOCHS = 300
 device  = "cuda"
-run_path = "/home/obola/repositories/cicero-scm-surrogate/data/20250805_152136"
+run_path = "/home/obola/repositories/cicero-scm-surrogate/data/20250926_110035"
 data_path = os.path.join(run_path, "processed")
 
 def load_processed_data(data_path):
@@ -45,13 +45,13 @@ def format_data(X_train, y_train, X_val, y_val, X_test, y_test):
     val_ds   = td.TensorDataset(torch.tensor(X_val_norm),   torch.tensor(y_val))
     test_ds   = td.TensorDataset(torch.tensor(X_test_norm),   torch.tensor(y_test))
 
-    train_loader = td.DataLoader(train_ds, batch_size = 1024, shuffle=True,
+    train_loader = td.DataLoader(train_ds, batch_size = 512, shuffle=True,
                              num_workers=2, pin_memory=True, persistent_workers=True)
     
-    val_loader   = td.DataLoader(val_ds,   batch_size = 1024, 
+    val_loader   = td.DataLoader(val_ds,   batch_size = 512, 
                              num_workers=2, pin_memory=True, persistent_workers=True)
     
-    test_loader   = td.DataLoader(test_ds,   batch_size = 1024, 
+    test_loader   = td.DataLoader(test_ds,   batch_size = 512, 
                              num_workers=2, pin_memory=True, persistent_workers=True)
 
     return train_loader, val_loader, test_loader, G
@@ -61,7 +61,8 @@ def train_model(X_train, y_train, X_val, y_val, X_test, y_test):
 
     #model   = GRUSurrogate(n_gas=G).to(device)
     model = LSTMSurrogate(n_gas=G, hidden=128, num_layers=1).to(device)
-    opt         = torch.optim.Adam(model.parameters(), lr=1e-2)
+    #model = TCNForecaster(n_gas=G, n_blocks=8, hidden=128, k=3).to(device)
+    opt         = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
     scheduler   = torch.optim.lr_scheduler.ReduceLROnPlateau(
                     opt, mode="min", factor=0.5, patience=5,
                     min_lr=1e-6)
@@ -104,4 +105,4 @@ def train_model(X_train, y_train, X_val, y_val, X_test, y_test):
 if __name__ == "__main__":
     X_train, y_train, X_val, y_val, X_test, y_test = load_processed_data(data_path=data_path)
     model = train_model(X_train, y_train, X_val, y_val, X_test, y_test)
-    torch.save(model.state_dict(), os.path.join(run_path, "model_lstm.pth"))
+    torch.save(model.state_dict(), os.path.join(run_path, "model_lstm_v2_128_1layer.pth"))

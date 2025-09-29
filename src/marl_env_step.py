@@ -153,7 +153,7 @@ class CICERONetEngine:
     def __init__(self, historical_emissions, model, device="cuda:0",
                  mu=None, std=None, autocast=True, use_half=True):
 
-        self.W = int(50)
+        self.W = int(65)
         self.device = torch.device(device)
         self.model = model.eval().to(self.device)
         self.use_half = bool(use_half) and (self.device.type == "cuda")

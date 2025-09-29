@@ -36,7 +36,7 @@ def plot_temperature_sequences(
 
     # Plot
     plt.figure(figsize=(6, 3))
-    cmap = plt.get_cmap("tab:cyan")
+    cmap = plt.get_cmap("ocean")
     for i, k in enumerate(idx):
         col = cmap(i)
         plt.plot(x, Y_true[k], color=col, lw=2.0, alpha = 0.5, label=f"S{i+1} — True")
