@@ -74,7 +74,7 @@ class ClimateMarlExperiment():
         # Load model
         run_dir="/home/obola/repositories/cicero-scm-surrogate/data/20250926_110035"
         device="cuda:0"
-        weights_name="model_lstm_v1.pth"
+        weights_name="model_lstm_256_2layer.pth"
 
         # Get standardizer
         run_path = "/home/obola/repositories/cicero-scm-surrogate/data/20250926_110035"
@@ -386,10 +386,10 @@ class ClimateMarlExperiment():
         t0 = time.time()
         for i in range(num_iterations):
             # # Test fixed action baseline
-            # trajectory, per_agent_return, total_return, t, obs, info_dict = self.rollout_fixed_actions()
-            # print("[greedy] per-agent returns:", {k: round(v, 2) for k, v in per_agent_return.items()})
-            # print("[greedy] temperature trajectory:", info_dict['country_0']['Temperature_trajectory'])
-            # policy_logger = self.print_greedy_summary(trajectory)
+            trajectory, per_agent_return, total_return, t, obs, info_dict = self.rollout_fixed_actions()
+            print("[greedy] per-agent returns:", {k: round(v, 2) for k, v in per_agent_return.items()})
+            print("[greedy] temperature trajectory:", info_dict['country_0']['Temperature_trajectory'])
+            policy_logger = self.print_greedy_summary(trajectory)
 
             result = algo.train()
             # Per-agent (per-policy) mean rewards
@@ -454,7 +454,7 @@ def main():
 
     # Env config
     env_config = {"N": 4, 
-                        "engine": "scm", 
+                        "engine": "net", 
                         "horizon": 35, 
                         "G": 40, 
                         "hist_end": 2015, 

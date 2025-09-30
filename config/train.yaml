@@ -1,0 +1,16 @@
+general:
+  data_id: /home/obola/repositories/cicero-scm-surrogate/data/20250930_204915
+  device: cuda
+model:
+  model_type: lstm
+  hidden_dims: 256
+  num_layers: 2
+  lr: 0.001
+  weight_decay: 0.0001
+  epochs: 5
+  batch_size: 256
+  num_workers: 2
+scheduler:
+  factor: 0.5
+  patience: 5
+  min_lr: 0.000001

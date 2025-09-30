@@ -81,13 +81,13 @@ def format_ml_data_to_rl(train_loader, val_loader, test_loader, shuffle=False, n
         DataLoader over a TensorDataset(X) with batch_size=1.
     """
     xs = []
-    for loader in (train_loader, val_loader, test_loader):
-        for batch in loader:
-            x = batch[0] if isinstance(batch, (tuple, list)) else batch
-            # move to CPU and detach
-            xs.append(x.detach().cpu())
+    
+    for batch in test_loader:
+        x = batch[0] if isinstance(batch, (tuple, list)) else batch
+        # move to CPU and detach
+        xs.append(x.detach().cpu())
 
-    X = torch.cat(xs, dim=0)[:100000]
+    X = torch.cat(xs, dim=0)[:10000]
     ds = TensorDataset(X)  # only X; targets intentionally ignored
     rl_loader = DataLoader(ds, batch_size=1, shuffle=shuffle, num_workers=num_workers, pin_memory=pin_memory)
 
@@ -151,7 +151,7 @@ def run_cicero_rl(rl_scenarios):
     output_variables = ["Surface Air Temperature Change"]
 
     latencies = []
-    for i, scenario in enumerate(tqdm(rl_scenarios[:100000], desc="CICERO-SCM speed-test")):
+    for i, scenario in enumerate(tqdm(rl_scenarios[:10000], desc="CICERO-SCM speed-test")):
         cscm_dir=CICEROSCM(scenario)
         t0 = time.time()
         cscm_dir._run({"results_as_dict":True}, pamset_udm=cfg[0]["pamset_udm"], pamset_emiconc=cfg[0]["pamset_emiconc"])

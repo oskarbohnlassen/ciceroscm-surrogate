@@ -1,7 +1,24 @@
 import sys
+from pathlib import Path
+
 import torch
 import numpy as np
+import yaml
 from sklearn.metrics import mean_squared_error, r2_score
+
+
+def load_yaml_config(path, nested_key=None):
+    """Load YAML configuration from *path* and optionally return a nested section."""
+    path = Path(path)
+    with path.open("r") as stream:
+        data = yaml.safe_load(stream)
+    if nested_key is None:
+        return data
+    if nested_key not in data:
+        raise KeyError(f"Expected key '{nested_key}' in {path}")
+    return data[nested_key]
+
+
 
 def validation_metrics(loader, model, device):
     y_true, y_pred = [], []
