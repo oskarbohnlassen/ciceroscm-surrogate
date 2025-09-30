@@ -1,6 +1,138 @@
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import os
+
+
+def plot_emission_ensemble(em_data, scenarios, gas, start_year=2000, n_sample=80, show_band=True, save_name=None):
+    """
+    Plot baseline trajectory (em_data[gas]) together with scenario trajectories.
+    """
+    mask = em_data.index >= start_year
+    years = em_data.index[mask].to_numpy()
+    baseline = em_data.loc[mask, gas].to_numpy()
+
+    # Stack scenario series: shape T x S
+    series = [scen["emissions_data"].loc[mask, gas].to_numpy() for scen in scenarios]
+    M = np.stack(series, axis=1)
+
+    # Percentiles for fan band
+    if show_band:
+        q5, q95 = np.percentile(M, [5, 95], axis=1)
+
+    # Sample a subset
+    S = M.shape[1]
+    rng = np.random.default_rng(0)
+    samp = np.arange(S) if S <= n_sample else rng.choice(S, size=n_sample, replace=False)
+
+    # --- Plot ---
+    plt.figure(figsize=(6, 3))
+    # Scenario lines (light gray)
+    plt.plot(years, M[:, samp], color="#999999", linewidth=0.8, alpha=0.15)
+    # Percentile band (soft blue)
+    if show_band:
+        plt.fill_between(years, q5, q95, color="#a6cee3", alpha=0.35, label="5–95% interval")
+    # Baseline (strong blue)
+    plt.plot(years, baseline, color="#1f78b4", linewidth=2.2, label="Baseline")
+
+    plt.xlabel("Year", fontsize = 14)
+    plt.ylabel(f"{gas} emissions (Mt/yr)", fontsize = 14)
+    plt.xticks(fontsize = 12)
+    plt.yticks(fontsize = 12)
+   # plt.title(f"{gas} — Baseline and scenario ensemble")
+    plt.legend(frameon=True, loc="upper right", bbox_to_anchor=(1, 1), fontsize = 12)    
+    plt.tight_layout()
+
+    if save_name:
+        os.makedirs("plots", exist_ok=True)
+        save_path = os.path.join("plots", save_name)
+        plt.savefig(save_path, dpi=300, bbox_inches="tight")
+    plt.show()
+
+def plot_temperature_ensemble(results, baseline_result, start_year=2000, n_sample=80, save_name=None, random_seed=0):
+    """
+    Plot baseline temperature trajectory with scenario ensemble (5–95% band + spaghetti).
+    Robust to year columns being str or int.
+    """
+    var_name = "Surface Air Temperature Change"
+    np.random.seed(random_seed)
+
+    # Identify all year columns (as ints), sorted
+    def _all_years(df):
+        ys = []
+        for c in df.columns:
+            if isinstance(c, (int, np.integer)):
+                ys.append(int(c))
+            elif isinstance(c, str) and c.isdigit():
+                ys.append(int(c))
+        return sorted(set(ys))
+
+    # Extract a 1D numpy array from a DataFrame/Series row for the given years,
+    # accepting either int or str column labels.
+    def _row_year_values(row_like, years_int):
+        idx = row_like.index
+        cols = []
+        for y in years_int:
+            if y in idx:
+                cols.append(y)
+            elif str(y) in idx:
+                cols.append(str(y))
+            else:
+                # year column missing: skip or raise; here we raise for clarity
+                raise KeyError(f"Year {y} not found in columns (int or str).")
+        return row_like[cols].to_numpy(dtype=float)
+
+    # 1) Filter variable
+    df_temp = results[results["variable"] == var_name].copy()
+    if df_temp.empty:
+        raise ValueError(f"`results` has no rows with variable == '{var_name}'.")
+
+    years_all = _all_years(df_temp)
+    years_mask = np.array(years_all) >= start_year
+    years = np.array(years_all)[years_mask]
+
+    # 2) Baseline series
+    base = baseline_result[baseline_result["variable"] == var_name]
+    if base.empty:
+        raise ValueError(f"`baseline_result` has no rows with variable == '{var_name}'.")
+    unit = str(base["unit"].iloc[0]) if "unit" in base.columns else "K"
+    base_row = base.iloc[0]
+    baseline_series = _row_year_values(base_row, years_all)[years_mask]
+
+    # 3) Stack scenarios into matrix (T x S)
+    vals = []
+    for _, row in df_temp.iterrows():
+        v = _row_year_values(row, years_all)
+        vals.append(v)
+    M_full = np.stack(vals, axis=1)     # shape: (T_all, S)
+    M = M_full[years_mask, :]           # keep >= start_year
+
+    # 4) Percentiles + sample subset
+    q5, q95 = np.percentile(M, [5, 95], axis=1)
+    S = M.shape[1]
+    rng = np.random.default_rng(random_seed)
+    samp = np.arange(S) if S <= n_sample else rng.choice(S, size=n_sample, replace=False)
+
+    # 5) Plot (style matched to emissions figures)
+    plt.figure(figsize=(12, 6))
+    plt.plot(years, M[:, samp], color="#999999", lw=0.8, alpha=0.3, zorder=1)     # spaghetti
+    plt.fill_between(years, q5, q95, color="#a6cee3", alpha=0.35, label="5–95% percentile", zorder=2)
+    plt.plot(years, baseline_series, color="#247ab3", lw=2.2, label="SSP2-4.5 baseline scenario", zorder=3)
+    if start_year <= 2015 <= years.max():
+        plt.axvline(2015, color="#28e008", lw=1, ls="--", label="Policy start (2015)", zorder=4, alpha=0.7)
+
+    plt.xlabel("Year", fontsize = 18)
+    plt.ylabel(f"Global Mean Surface Air Temperature ({unit})", fontsize = 18)
+    plt.legend(frameon=True, loc="upper left", fontsize = 16)
+    plt.xticks(fontsize = 16)
+    #plt.xticks(np.arange(years.min(), years.max()+1, 5), fontsize = 16)
+    plt.yticks(fontsize = 16)
+    plt.tight_layout()
+
+    if save_name:
+        os.makedirs("plots", exist_ok=True)
+        plt.savefig(os.path.join("plots", save_name), dpi=300, bbox_inches="tight")
+    plt.show()
 
 def plot_temperature_sequences(
     y_true, 
