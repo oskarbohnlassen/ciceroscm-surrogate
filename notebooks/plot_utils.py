@@ -426,3 +426,50 @@ def plot_policy_consistency(
         plt.savefig(savefig, dpi=300, bbox_inches="tight")
     plt.show()
 
+
+
+# Function to plot schematic with clean style and updated legend
+def plot_schematic(end_year, save_path):
+    np.random.seed(0)
+    years = np.arange(1965, 2051)
+    n_years = len(years)
+    
+    # Simulated gas data
+    gas1 = np.cumsum(np.random.randn(n_years)) * 0.02 + 1.0
+    gas2 = np.cumsum(np.random.randn(n_years)) * 0.015 + 0.5
+    temp = 0.02 * (years - 1965) + np.sin(0.1 * (years - 1965)) * 0.2  # base-like temperature
+    
+    start_window = end_year - 50
+    mask_window = (years >= start_window) & (years <= end_year)
+    
+    fig, ax1 = plt.subplots(figsize=(6, 3))
+    
+    # Plot gases
+    ax1.plot(years, gas1, label="Gas 1", color="tab:blue")
+    ax1.plot(years, gas2, label="Gas 2", color="tab:green")
+    
+    # Highlight window
+    ax1.axvspan(start_window, end_year, color="gray", alpha=0.2, label="Input window (only gases)")
+    ax1.set_ylabel("Illustrative emissions")
+    
+    # Plot temperature on secondary axis
+    ax2 = ax1.twinx()
+    ax2.plot(years, temp, "--", color="black", label=r"$\Delta T$ (not part of input window)")
+    ax2.set_ylabel("Illustrative temperature")
+    
+    # Mark target year
+    target_year = end_year + 1
+    target_temp = temp[years == target_year][0]
+    ax2.scatter(target_year, target_temp, color="red", zorder=5, label="Target ΔT")
+    
+    # Legend combining both axes
+    lines_1, labels_1 = ax1.get_legend_handles_labels()
+    lines_2, labels_2 = ax2.get_legend_handles_labels()
+    ax1.legend(lines_1 + lines_2, labels_1 + labels_2, loc="upper left", fontsize=8)
+    
+    ax1.set_xlim(1965, 2050)
+    plt.tight_layout()
+    
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    plt.savefig(save_path, dpi=300, bbox_inches="tight")
+    plt.show()

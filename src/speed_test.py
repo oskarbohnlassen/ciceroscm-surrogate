@@ -1,195 +1,283 @@
-import sys
-import os
 import pickle
+import time
+from pathlib import Path
+import sys
+
 import numpy as np
 import pandas as pd
-import time
-import matplotlib.pyplot as plt
-import copy
-from tqdm import tqdm
-
 import torch
-from torch.utils.data import DataLoader, TensorDataset
+import yaml
+from tqdm.auto import tqdm
 
-sys.path.insert(0,os.path.join(os.getcwd(), '../ciceroscm/', 'src')) ## Make ciceroscm importable
-CURR_DIR = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, CURR_DIR)  # make 'train.py' and 'model.py' importable
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
 
-from ciceroscm import CICEROSCM
-from ciceroscm.parallel.cscmparwrapper import run_ciceroscm_parallel
-import ciceroscm.input_handler as input_handler
-from train import load_processed_data, format_data
-from model import LSTMSurrogate
+from marl_env_step import CICERONetEngine, CICEROSCMEngine
+from src.utils.config_utils import load_yaml_config
+from src.utils.data_utils import determine_variable_gases
+from src.utils.model_utils import instantiate_model, parse_model_config, load_state_dict
 
-cfg = [
-    {
-        "pamset_udm": {
-            "rlamdo": 15.08357,
-            "akapa": 0.6568376339229769,
-            "cpi": 0.2077266,
-            "W": 2.205919,
-            "beto": 6.89822,
-            "lambda": 0.6062529,
-            "mixed": 107.2422,
-        },
-        "pamset_emiconc": {
-            "qbmb": 0.0,
-            "qo3": 0.5,
-            "qdirso2": -0.3562,
-            "qindso2": -0.96609,
-            "qbc": 0.1566,
-            "qoc": -0.0806,
-        },
-        "Index": "13555_old_NR_improved",
-    }
-]
+class SpeedTestPipeline:
+    """Benchmark CICERO surrogate vs. CICERO SCM using configured data and model."""
 
-conc_data_first = 1750
-conc_data_last = 2100
+    def __init__(self):
+        config = load_yaml_config("speed_test.yaml", "speed_test")
+        self.config = config
+        self.data_run = Path(config["data_run"]).expanduser()
+        if not self.data_run.exists():
+            raise FileNotFoundError(f"Data run directory not found: {self.data_run}")
 
-em_data_start = 1900
-em_data_policy = 2015
+        training_run_path = Path(config["training_run"]).expanduser()
+        if training_run_path.is_absolute():
+            self.training_run = training_run_path
+        else:
+            self.training_run = (self.data_run / training_run_path).resolve()
+        if not self.training_run.exists():
+            raise FileNotFoundError(f"Training run directory not found: {self.training_run}")
 
+        self.cuda_available = torch.cuda.is_available()
 
-def load_ml_data_model():
-    run_dir = "/home/obola/repositories/cicero-scm-surrogate/data/20250926_110035"
-    data_dir = os.path.join(run_dir, "processed")
-    device = "cuda:0"
+        self.use_half = bool(config["use_half"]) and self.cuda_available
+        self.autocast = bool(config["autocast"]) and self.cuda_available
+        self.max_samples = int(config["max_samples"])
+        self.warmup_steps = int(config["warmup_steps"])
 
-    # Load and format data
-    X_train, y_train, X_val, y_val, X_test, y_test = load_processed_data(data_dir)
-    train_loader, val_loader, test_loader, G = format_data(X_train, y_train, X_val, y_val, X_test, y_test)
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        output_dir_name = config["output_dir_name"]
+        self.output_dir = self.training_run / output_dir_name / timestamp
+        self.output_dir.mkdir(parents=True, exist_ok=True)
 
-    model = LSTMSurrogate(n_gas=G, hidden=256, num_layers=2).to(device)
+        self.processed_dir = self.data_run / "processed"
+        self.raw_dir = self.data_run / "raw"
+        self.configs_dir = self.data_run / "configs"
+        self.speed_test_config_path = self.output_dir / "speed_test_config.yaml"
+        with self.speed_test_config_path.open("w") as f:
+            yaml.safe_dump({"speed_test": self.config}, f, sort_keys=False)
 
-    # Load model parameters
-    model_dir = os.path.join(run_dir, "model_lstm_v1.pth")
-    model.load_state_dict(torch.load(model_dir, map_location=device, weights_only=False))
+        self.cicero_config = load_yaml_config(self.configs_dir / "cicero_scm.yaml")
+        self.data_generation_config = load_yaml_config(
+            self.configs_dir / "data_generation.yaml", "data_generation_params"
+        )
+        self.data_processing_config = load_yaml_config(
+            self.configs_dir / "data_processing.yaml", "data_processing_params"
+        )
 
-    return train_loader, val_loader, test_loader, model
+        cfg_entry = self.cicero_config["cfg"][0]
+        self.pamset_udm = cfg_entry["pamset_udm"]
+        self.pamset_emiconc = cfg_entry["pamset_emiconc"]
+        self.em_data_start = self.cicero_config["em_data_start"]
+        self.em_data_policy = self.cicero_config["em_data_policy"]
+        self.window_size = self.data_processing_config["window_size"]
 
+        self.training_config = load_yaml_config(self.training_run / "train_config.yaml")
+        X_train = self._load_array("X_train.npy", mmap=True)
+        self.mu, self.std = self._compute_normalization_stats(X_train)
+        del X_train
+        self.scenarios = self._load_scenarios()
+        if not self.scenarios:
+            raise ValueError("No scenarios available in raw data")
+        gas_names = self.scenarios[0]["emissions_data"].columns
+        self.variable_gases = determine_variable_gases(self.data_generation_config, gas_names)
 
-def format_ml_data_to_rl(train_loader, val_loader, test_loader, shuffle=False, num_workers=0, pin_memory=True):
-    """
-    Collapse train/val/test loaders into a single DataLoader that yields
-    one sample per batch (RL-style). Assumes each incoming loader yields
-    (X, y) or X; ignores y entirely.
+    def _load_model(self, device: str):
+        model_cfg = self.training_config["model"]
+        model_type, hidden_size, num_layers, kernel_size = parse_model_config(model_cfg)
+        n_gas = self._infer_gas_count()
+        if len(self.variable_gases) != n_gas:
+            raise ValueError(
+                "Mismatch between processed gas count and selected gases list: "
+                f"{n_gas} vs {len(self.variable_gases)}"
+            )
 
-    Returns
-    -------
-    rl_loader : DataLoader
-        DataLoader over a TensorDataset(X) with batch_size=1.
-    """
-    xs = []
-    
-    for batch in test_loader:
-        x = batch[0] if isinstance(batch, (tuple, list)) else batch
-        # move to CPU and detach
-        xs.append(x.detach().cpu())
+        model = instantiate_model(
+            model_type,
+            n_gas,
+            hidden_size,
+            num_layers,
+            kernel_size=kernel_size,
+            device=device,
+        )
+        state_path = self.training_run / "model.pth"
+        if not state_path.exists():
+            raise FileNotFoundError(f"Model state dict not found: {state_path}")
+        state = torch.load(state_path, map_location="cpu")
+        load_state_dict(model, state)
+        return model
 
-    X = torch.cat(xs, dim=0)[:10000]
-    ds = TensorDataset(X)  # only X; targets intentionally ignored
-    rl_loader = DataLoader(ds, batch_size=1, shuffle=shuffle, num_workers=num_workers, pin_memory=pin_memory)
+    def _infer_gas_count(self):
+        return self._load_array("X_train.npy", mmap=True).shape[2]
 
-    return rl_loader
+    def _load_array(self, name: str, mmap: bool = False):
+        path = self.processed_dir / name
+        if not path.exists():
+            raise FileNotFoundError(f"Processed array missing: {path}")
+        if mmap:
+            return np.load(path, mmap_mode="r")
+        return np.load(path)
 
-def run_ml_inference(model, rl_loader, device = "cuda:0"):
+    @staticmethod
+    def _compute_normalization_stats(X):
+        gases = X.shape[2]
+        mu = X.reshape(-1, gases).mean(axis=0)
+        std = X.reshape(-1, gases).std(axis=0) + 1e-6
+        return mu, std
 
-    # Model eval
-    model.eval().to(device)
+    def _load_scenarios(self):
+        scenario_path = self.raw_dir / "scenarios.pkl"
+        if not scenario_path.exists():
+            raise FileNotFoundError(f"Scenario pickle not found: {scenario_path}")
+        with scenario_path.open("rb") as f:
+            return pickle.load(f)
 
-    # The data we need
-    latencies = []
-
-    ## WARM UP
-    with torch.inference_mode():
-        for batch in rl_loader:
-            xb = batch[0]
-            xb = xb.to(device, non_blocking=True)
-            _ = model(xb)
+    @staticmethod
+    def _sync_device(device: str):
+        if device.startswith("cuda"):
             torch.cuda.synchronize()
-            break
 
-    with torch.inference_mode():
-        for i, batch in enumerate(tqdm(rl_loader, desc="CICERO-NET speed-test")):
-            torch.cuda.synchronize()
-            t0 = time.perf_counter()
-            xb = batch[0]
-            xb = xb.to(device, non_blocking=True)            
-            y_hat_i = model(xb)
-            t1 = time.perf_counter()
-            latencies.append(t1 - t0)
+    def _scenario_iterator(self):
+        for scenario in self.scenarios:
+            em_df = scenario["emissions_data"].copy()
+            if not isinstance(em_df, pd.DataFrame):
+                continue
+            hist_full = em_df.loc[: self.em_data_policy]
+            if len(hist_full) < self.window_size:
+                continue
+            future_full = em_df.loc[self.em_data_policy + 1 :]
+            if future_full.empty:
+                continue
+            hist_subset = hist_full.loc[:, self.variable_gases]
+            future_subset = future_full.loc[:, self.variable_gases]
+            yield scenario, hist_full, future_full, hist_subset, future_subset
 
-    latencies_numpy = np.asarray(latencies, dtype=float)
- 
-    return latencies_numpy
+    def _measure_surrogate_latencies(self, device: str, use_half: bool, autocast: bool):
+        model = self._load_model(device)
+        latencies = []
+        recorded = 0
+        warmup_remaining = self.warmup_steps
 
- 
-def load_cicero_data():
-    scenario_path = "/home/obola/repositories/cicero-scm-surrogate/data/20250926_110035/raw/scenarios.pkl"
-    scenarios = pickle.load(open(scenario_path, "rb"))
+        progress = tqdm(total=self.max_samples, desc=f"CICERONet ({device})", leave=False)
 
-    return scenarios
+        for _, _, _, hist_df, future_df in self._scenario_iterator():
+            engine = CICERONetEngine(
+                historical_emissions=hist_df.to_numpy(dtype=np.float32),
+                model=model,
+                device=device,
+                mu=self.mu,
+                std=self.std,
+                autocast=autocast,
+                use_half=use_half,
+                window_size=self.window_size,
+            )
+            for _, row in future_df.iterrows():
+                action = row.to_numpy(dtype=np.float32)
+                if warmup_remaining > 0:
+                    engine.step(action)
+                    warmup_remaining -= 1
+                    continue
+                if recorded >= self.max_samples:
+                    break
+                self._sync_device(device)
+                t0 = time.perf_counter()
+                engine.step(action)
+                self._sync_device(device)
+                latencies.append(time.perf_counter() - t0)
+                recorded += 1
+                progress.update(1)
+            if recorded >= self.max_samples:
+                break
 
-def format_cicero_data_into_rl(scenarios):
+        progress.close()
+        return np.asarray(latencies, dtype=float)
 
-    rl_scenarios = []
-    for scenario in scenarios:
-        em_data = scenario['emissions_data'].copy()
-        for policy_year in range(2015,2066):
-            em_data_new = em_data.loc[:policy_year].copy()
-            new_scenario = scenario.copy() 
-            new_scenario['emissions_data'] = em_data_new
-            new_scenario['nyend'] = policy_year
+    def _measure_cicero_latencies(self):
+        latencies = []
+        recorded = 0
+        warmup_remaining = self.warmup_steps
 
-            rl_scenarios.append(new_scenario)
+        progress = tqdm(total=self.max_samples, desc="CICERO-SCM", leave=False)
 
-    return rl_scenarios
+        for scenario, hist_full, future_full, _, _ in self._scenario_iterator():
+            engine = CICEROSCMEngine(
+                historical_emissions=hist_full.copy(),
+                gaspam_data=scenario["gaspam_data"],
+                conc_data=scenario["concentrations_data"],
+                nat_ch4_data=scenario["nat_ch4_data"],
+                nat_n2o_data=scenario["nat_n2o_data"],
+                pamset_udm=self.pamset_udm,
+                pamset_emiconc=self.pamset_emiconc,
+                em_data_start=self.em_data_start,
+                em_data_policy=self.em_data_policy,
+                udir=scenario["udir"],
+                idtm=scenario["idtm"],
+                scenname=scenario["scenname"],
+            )
+            for _, row in future_full.iterrows():
+                action = row.to_numpy(dtype=np.float32)
+                if warmup_remaining > 0:
+                    engine.step(action)
+                    warmup_remaining -= 1
+                    continue
+                if recorded >= self.max_samples:
+                    break
+                t0 = time.perf_counter()
+                engine.step(action)
+                latencies.append(time.perf_counter() - t0)
+                recorded += 1
+                progress.update(1)
+            if recorded >= self.max_samples:
+                break
 
-def run_cicero_rl(rl_scenarios):
-    
-    output_variables = ["Surface Air Temperature Change"]
+        progress.close()
+        return np.asarray(latencies, dtype=float)
 
-    latencies = []
-    for i, scenario in enumerate(tqdm(rl_scenarios[:10000], desc="CICERO-SCM speed-test")):
-        cscm_dir=CICEROSCM(scenario)
-        t0 = time.time()
-        cscm_dir._run({"results_as_dict":True}, pamset_udm=cfg[0]["pamset_udm"], pamset_emiconc=cfg[0]["pamset_emiconc"])
-        t1 = time.time()
-        latencies.append(t1 - t0)
+    def run(self):
+        surrogate_latencies = {
+            "cpu": self._measure_surrogate_latencies(
+                device="cpu", use_half=False, autocast=False
+            )
+        }
+        if self.cuda_available:
+            surrogate_latencies["cuda"] = self._measure_surrogate_latencies(
+                device="cuda", use_half=self.use_half, autocast=self.autocast
+            )
 
-    latencies_numpy = np.asarray(latencies, dtype=float)
-    return latencies_numpy
+        cicero_latencies = self._measure_cicero_latencies()
+
+        surrogate_npz_payload = {
+            f"{device}_latencies": arr for device, arr in surrogate_latencies.items()
+        }
+        np.savez(self.output_dir / "surrogate_latencies.npz", **surrogate_npz_payload)
+        np.savez(self.output_dir / "cicero_latencies.npz", cicero_latencies=cicero_latencies)
+
+        summary_path = self.output_dir / "summary.txt"
+        cic_mean = float(np.mean(cicero_latencies)) if cicero_latencies.size else float("nan")
+        cic_median = float(np.median(cicero_latencies)) if cicero_latencies.size else float("nan")
+        with summary_path.open("w") as f:
+            f.write("CICERONet latency (s)\n")
+            for device, arr in surrogate_latencies.items():
+                mean = float(np.mean(arr)) if arr.size else float("nan")
+                median = float(np.median(arr)) if arr.size else float("nan")
+                f.write(f"  [{device}] mean: {mean:.6f}\n")
+                f.write(f"  [{device}] median: {median:.6f}\n")
+                f.write(f"  [{device}] samples: {len(arr)}\n")
+            f.write("\nCICERO-SCM latency (s)\n")
+            f.write(f"  mean: {cic_mean:.6f}\n")
+            f.write(f"  median: {cic_median:.6f}\n")
+            f.write(f"  samples: {len(cicero_latencies)}\n")
+
+        print("Speed test complete. Summary written to", summary_path)
+        for device, arr in surrogate_latencies.items():
+            mean = float(np.mean(arr)) if arr.size else float("nan")
+            print(
+                f"CICERONet mean latency [{device}]: {mean:.6f}s ({len(arr)} samples)"
+            )
+        print(f"CICERO-SCM mean latency: {cic_mean:.6f}s ({len(cicero_latencies)} samples)")
+
 
 def main():
-    train_loader, val_loader, test_loader, model = load_ml_data_model()
-    rl_loader = format_ml_data_to_rl(train_loader, val_loader, test_loader, shuffle=False)
-    surrogate_latencies_cuda = run_ml_inference(model, rl_loader, device="cuda:0")
+    pipeline = SpeedTestPipeline()
+    pipeline.run()
 
-    print(f"Mean latency surrogate cuda: {np.mean(surrogate_latencies_cuda)}")
-    print(f"Sum latency surrogate cuda: {np.sum(surrogate_latencies_cuda)}")
-    print(f"Num experiment surrogate cuda: {len(surrogate_latencies_cuda)}")
-    np.savez("surrogate_latencies_cuda.npz", surrogate_latencies_cuda)
-
-    surrogate_latencies_cpu = run_ml_inference(model, rl_loader, device="cpu")
-
-    print(f"Mean latency surrogate cpu: {np.mean(surrogate_latencies_cpu)}")
-    print(f"Sum latency surrogate cpu: {np.sum(surrogate_latencies_cpu)}")
-    print(f"Num experiment surrogate cpu: {len(surrogate_latencies_cpu)}")
-    np.savez("surrogate_latencies_cpu.npz", surrogate_latencies_cpu)
-
-    scenarios = load_cicero_data()
-    rl_scenarios = format_cicero_data_into_rl(scenarios)
-    cicero_latencies = run_cicero_rl(rl_scenarios)
-
-    print(f"Mean latency cicero: {np.mean(cicero_latencies)}")
-    print(f"Sum latency cicero: {np.sum(cicero_latencies)}")
-    print(f"Num experiment cicero: {len(cicero_latencies)}")
-    np.savez("cicero_latencies.npz", cicero_latencies)
 
 if __name__ == "__main__":
     main()
-
-
-
-

@@ -1,30 +1,27 @@
 import pickle
 from pathlib import Path
-
+import sys
 import numpy as np
 from sklearn.model_selection import train_test_split
 from tqdm.auto import tqdm
 import yaml
 
-from utils import load_yaml_config
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
 
-
-CONFIG_DIR = Path(__file__).resolve().parent.parent / "config"
-
-
-def load_config():
-    """Load data-processing configuration values from YAML."""
-    return load_yaml_config(CONFIG_DIR / "data_processing.yaml", "data_processing_params")
-
+from src.utils.config_utils import load_yaml_config
+from src.utils.data_utils import determine_variable_gases, load_simulation_data
 
 class DataProcessingPipeline:
     """Prepare machine-learning datasets from CICERO simulation outputs."""
 
-    def __init__(self, config: dict):
+    def __init__(self):
+        config = load_yaml_config("data_processing.yaml", "data_processing_params")
+
         self.config = config
-        self.run_path = Path(config["run_id"]).expanduser()
-        self.raw_dir = self.run_path / "raw"
-        self.processed_dir = self.run_path / "processed"
+        self.data_dir = Path(config["data_dir"]).expanduser()
+        self.data_raw_dir = self.data_dir / "raw"
+        self.data_processed_dir = self.data_dir / "processed"
 
         self.window_size = config["window_size"]
         splits = config["split"]
@@ -39,31 +36,29 @@ class DataProcessingPipeline:
 
         self.random_state = config.get("random_state", 0)
 
-        self.configs_dir = self.run_path / "configs"
+        self.configs_dir = self.data_dir / "configs"
         self.configs_dir.mkdir(parents=True, exist_ok=True)
         self.cicero_config = load_yaml_config(self.configs_dir / "cicero_scm.yaml")
-        self.data_generation_config = load_yaml_config(
-            self.configs_dir / "data_generation.yaml", "data_generation_params"
-        )
+        self.data_generation_config = load_yaml_config(self.configs_dir / "data_generation.yaml", "data_generation_params")
         self.em_data_policy = self.cicero_config["em_data_policy"]
         self._save_run_config()
+        self.variable_gases = None
 
     def load_simulation_data(self):
         """Load raw simulation results and scenarios from the run directory."""
-        with open(self.raw_dir / "results.pkl", "rb") as f:
-            results = pickle.load(f)
+        results, scenarios = load_simulation_data(self.data_raw_dir)
+        self.results = results
+        self.scenarios = scenarios
 
-        with open(self.raw_dir / "scenarios.pkl", "rb") as f:
-            scenarios = pickle.load(f)
+    def format_results(self):
+ 
+        gas_names = self.scenarios[0]["emissions_data"].columns
+        self.variable_gases = determine_variable_gases(self.data_generation_config, gas_names)
 
-        return results, scenarios
-
-    def format_results(self, results, scenarios):
-        """Create train/val/test datasets according to configured splits."""
-        gases = scenarios[0]["emissions_data"].columns.tolist()
+        gases = self.variable_gases
 
         temp_tbl = (
-            results[results["variable"] == "Surface Air Temperature Change"]
+            self.results[self.results["variable"] == "Surface Air Temperature Change"]
             .set_index("scenario")
             .filter(regex=r"^\d")
             .astype(float)
@@ -71,7 +66,7 @@ class DataProcessingPipeline:
         temp_tbl.columns = temp_tbl.columns.astype(int)
 
         scen_trainval, scen_test = train_test_split(
-            scenarios,
+            self.scenarios,
             test_size=self.test_split,
             random_state=self.random_state,
             shuffle=True,
@@ -96,7 +91,7 @@ class DataProcessingPipeline:
 
             for scen in scenario_iter:
                 name = scen["scenname"]
-                em_df = scen["emissions_data"]
+                em_df = scen["emissions_data"].loc[:, gases]
                 years = em_df.index
 
                 T_air = temp_tbl.loc[name, years].to_numpy()
@@ -106,8 +101,8 @@ class DataProcessingPipeline:
                     if t_target < self.em_data_policy:
                         continue
 
-                    hist = em_df.loc[t_target - self.window_size : t_target - 1, gases].to_numpy()
-                    next_em = em_df.loc[t_target, gases].to_numpy()
+                    hist = em_df.loc[t_target - self.window_size : t_target - 1, :].to_numpy()
+                    next_em = em_df.loc[t_target, :].to_numpy()
                     X_sample = np.vstack([hist, next_em[None, :]]).astype("float32")
                     y_sample = np.float32(T_air[t_idx + 1])
 
@@ -122,81 +117,59 @@ class DataProcessingPipeline:
         X_val, y_val = generate_machine_learning_data(scen_val, "validation")
         X_test, y_test = generate_machine_learning_data(scen_test, "test")
 
-        return (
-            X_train,
-            y_train,
-            X_val,
-            y_val,
-            X_test,
-            y_test,
-            scen_train,
-            scen_val,
-            scen_test,
-        )
+        self.X_train, self.y_train = X_train, y_train
+        self.X_val, self.y_val = X_val, y_val
+        self.X_test, self.y_test = X_test, y_test
+        self.train_scenarios = scen_train
+        self.val_scenarios = scen_val
+        self.test_scenarios = scen_test
 
-    def save_processed_data(
-        self,
-        X_train,
-        y_train,
-        X_val,
-        y_val,
-        X_test,
-        y_test,
-        train_scenarios,
-        val_scenarios,
-        test_scenarios,
-    ):
+        # Compute normalization stats from training data
+        self.compute_mu_std(X_train)
+
+    def compute_mu_std(self, X_data):
+        """Compute mean and standard deviation for normalization."""
+ 
+        gases = X_data.shape[2]
+        mu = X_data.reshape(-1, gases).mean(axis=0)
+        std = X_data.reshape(-1, gases).std(axis=0) + 1e-6
+
+        self.mu = mu
+        self.std = std
+
+    def save_processed_data(self):
         """Persist processed datasets and scenario splits to disk."""
-        self.processed_dir.mkdir(parents=True, exist_ok=True)
+        self.data_processed_dir.mkdir(parents=True, exist_ok=True)
 
-        np.save(self.processed_dir / "X_train.npy", X_train)
-        np.save(self.processed_dir / "y_train.npy", y_train)
-        np.save(self.processed_dir / "X_val.npy", X_val)
-        np.save(self.processed_dir / "y_val.npy", y_val)
-        np.save(self.processed_dir / "X_test.npy", X_test)
-        np.save(self.processed_dir / "y_test.npy", y_test)
+        np.save(self.data_processed_dir / "X_train.npy", self.X_train)
+        np.save(self.data_processed_dir / "y_train.npy", self.y_train)
+        np.save(self.data_processed_dir / "X_val.npy", self.X_val)
+        np.save(self.data_processed_dir / "y_val.npy", self.y_val)
+        np.save(self.data_processed_dir / "X_test.npy", self.X_test)
+        np.save(self.data_processed_dir / "y_test.npy", self.y_test)
+        np.save(self.data_processed_dir / "mu_train.npy", self.mu)
+        np.save(self.data_processed_dir / "std_train.npy", self.std)
 
-        with open(self.processed_dir / "train_scenarios.pkl", "wb") as f:
-            pickle.dump(train_scenarios, f)
-        with open(self.processed_dir / "val_scenarios.pkl", "wb") as f:
-            pickle.dump(val_scenarios, f)
-        with open(self.processed_dir / "test_scenarios.pkl", "wb") as f:
-            pickle.dump(test_scenarios, f)
+        with open(self.data_processed_dir / "train_scenarios.pkl", "wb") as f:
+            pickle.dump(self.train_scenarios, f)
+        with open(self.data_processed_dir / "val_scenarios.pkl", "wb") as f:
+            pickle.dump(self.val_scenarios, f)
+        with open(self.data_processed_dir / "test_scenarios.pkl", "wb") as f:
+            pickle.dump(self.test_scenarios, f)
 
     def _save_run_config(self):
         """Persist the data-processing configuration alongside the dataset."""
         with open(self.configs_dir / "data_processing.yaml", "w") as f:
             yaml.safe_dump({"data_processing_params": self.config}, f, sort_keys=False)
 
+    def run(self):
+        self.load_simulation_data()
+        self.format_results()
+        self.save_processed_data()
 
 def main():
-    config = load_config()
-    pipeline = DataProcessingPipeline(config)
-
-    results, scenarios = pipeline.load_simulation_data()
-    (
-        X_train,
-        y_train,
-        X_val,
-        y_val,
-        X_test,
-        y_test,
-        train_scenarios,
-        val_scenarios,
-        test_scenarios,
-    ) = pipeline.format_results(results, scenarios)
-    pipeline.save_processed_data(
-        X_train,
-        y_train,
-        X_val,
-        y_val,
-        X_test,
-        y_test,
-        train_scenarios,
-        val_scenarios,
-        test_scenarios,
-    )
-
+    pipeline = DataProcessingPipeline()
+    pipeline.run()
 
 if __name__ == "__main__":
     main()

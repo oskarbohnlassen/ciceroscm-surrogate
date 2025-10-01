@@ -1,171 +1,41 @@
-from email import policy
-from gymnasium import spaces
-from ray.rllib.env import MultiAgentEnv
+import argparse
+import json
+import os
+import sys
+import time
+import warnings
+from pathlib import Path
+
+import numpy as np
+import torch
+
 from ray.rllib.algorithms.ppo import PPOConfig
 from ray.tune.registry import register_env
 
-import sys
-import os
-import numpy as np
-import torch
-import pickle
-import time
-import copy
-import pandas as pd
-import importlib
-import matplotlib.pyplot as plt
-from collections import defaultdict
-import json
-
-
-import warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning, module="ray.*")
 warnings.filterwarnings("ignore", message=".*Logger.*deprecated.*", category=DeprecationWarning)
 
-sys.path.insert(0,os.path.join(os.getcwd(), '../ciceroscm/', 'src')) ## Make ciceroscm importable
-CURR_DIR = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, CURR_DIR)  # make 'train.py' and 'model.py' importable
+sys.path.insert(0, os.path.join(os.getcwd(), '../ciceroscm/', 'src'))  # Make ciceroscm importable
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
 
-from ciceroscm import CICEROSCM
-from ciceroscm.parallel.cscmparwrapper import run_ciceroscm_parallel
-import ciceroscm.input_handler as input_handler
-from train import load_processed_data, format_data
-from model import LSTMSurrogate
-from data_generation import load_core_data
-from marl_env import ClimateMARL
+from marl_env import ClimateMARL  # noqa: E402
+from src.utils.marl_utils import load_marl_setup, _to_jsonable  # noqa: E402
+from src.utils.config_utils import load_yaml_config
 
 
-class ClimateMarlExperiment():
-    def __init__(self,
-                env_config, 
-                economics_config, 
-                actions_config,
-                emission_data):
-        
-        # Env config
+class ClimateMarlExperiment:
+    def __init__(self, env_config, emission_data, economics_config, actions_config, training_cfg):
         self.env_config = env_config
-
-        # Emission data
         self.emission_data = emission_data
-        self.historical_emissions = emission_data['historical_emissions']
-        self.baseline_emissions = emission_data['baseline_emissions']
-        self.gaspam_data = emission_data['gaspam_data']
-        self.conc_data = emission_data['conc_data']
-        self.nat_ch4_data = emission_data['nat_ch4_data']
-        self.nat_n2o_data = emission_data['nat_n2o_data']
-
-        # Economics
         self.economics_config = economics_config
-
-        # Actions
         self.actions_config = actions_config
-        
-        
-    def compute_training_stats(self, result):
-
-        for key, value in result.items():
-            print(f"{key}: {value} \n")
-            print("-"*40)
-            
-
-        return None
-
-    def load_surrogate(self):
-        # Load model
-        run_dir="/home/obola/repositories/cicero-scm-surrogate/data/20250926_110035"
-        device="cuda:0"
-        weights_name="model_lstm_256_2layer.pth"
-
-        # Get standardizer
-        run_path = "/home/obola/repositories/cicero-scm-surrogate/data/20250926_110035"
-        data_path = os.path.join(run_path, "processed")
-        X_train = np.load(os.path.join(data_path, "X_train.npy"))
-
-        model = LSTMSurrogate(n_gas=40, hidden=256, num_layers=2).to(device)
-        wpath = os.path.join(run_dir, weights_name)
-        state = torch.load(wpath, map_location=device, weights_only=False)
-        model.load_state_dict(state)
-        model.eval()
-        for p in model.parameters():
-            p.requires_grad_(False)
-
-        self.cicero_net = model
-        self.gas_mu  = X_train.reshape(-1, 40).mean(axis=0) 
-        self.gas_std = X_train.reshape(-1, 40).std(axis=0) + 1e-6
-
-    
-    def make_env_step_configs(self):
-        '''
-        Make env step configs
-        '''
-        # Surrogate net params
-        state_dict_cpu = {k: v.cpu() for k, v in self.cicero_net.state_dict().items()}
-        state_dict_np = {k: v.numpy() for k, v in state_dict_cpu.items()}
-
-        net_params = {
-            "state_dict_np": state_dict_np,       # pure numpy
-            "device": "cuda:0",
-            "mu": self.gas_mu.tolist(),
-            "std": self.gas_std.tolist(),
-            "autocast": False,
-            "use_half": False,
-        }
-        self.env_config["net_params"] = net_params
-
-        # SCM params
-        cfg = [
-            {
-                "pamset_udm": {
-                    "rlamdo": 15.08357,
-                    "akapa": 0.6568376339229769,
-                    "cpi": 0.2077266,
-                    "W": 2.205919,
-                    "beto": 6.89822,
-                    "lambda": 0.6062529,
-                    "mixed": 107.2422,
-                },
-                "pamset_emiconc": {
-                    "qbmb": 0.0,
-                    "qo3": 0.5,
-                    "qdirso2": -0.3562,
-                    "qindso2": -0.96609,
-                    "qbc": 0.1566,
-                    "qoc": -0.0806,
-                },
-                "Index": "13555_old_NR_improved",
-            }
-        ]
-        
-        scm_params = {
-            "gaspam_data": self.gaspam_data,
-            "conc_data": self.conc_data,
-            "nat_ch4_data": self.nat_ch4_data,
-            "nat_n2o_data": self.nat_n2o_data,
-            "pamset_udm": cfg[0]["pamset_udm"],
-            "pamset_emiconc": cfg[0]["pamset_emiconc"],
-            "em_data_start": 1900,
-            "em_data_policy": 2015,
-            "udir": "/home/obola/repositories/cicero-scm-surrogate/ciceroscm/tests/test-data",
-            "idtm": 24,
-            "scenname": "scm_marl_test"
-        }
-        self.env_config["scm_params"] = scm_params
-
+        self.training_cfg = training_cfg
+        self.lever_names = list(actions_config["lever_names"])
+        self.action_dim = len(actions_config["action_sizes"])
+        self.adaptation_idx = self.action_dim - 1
 
     def rollout_fixed_actions(self, seed=None):
-        """
-        Run one episode with fixed hard-coded actions:
-        emission = -4%   (index 0)
-        prevention = 0%  (index 0)
-
-        Returns:
-            trajectory: list of {agent_id -> action[list[int]]} per step
-            per_agent_return: dict[agent_id -> float]
-            total_return: float
-            episode_len: int
-            obs: last observation dict
-            info_dict: last info dict (contains T_series etc. if env stores it)
-        """
         env = ClimateMARL(
             self.env_config,
             self.emission_data,
@@ -183,10 +53,9 @@ class ClimateMarlExperiment():
         info_dict = {}
 
         while not done:
-            # Hard-coded actions: [emission_index, prevention_index]
-            # Index 0 corresponds to -4% emission, 0% prevention in your action tables.
-            actions = {agent_id: np.array([0, 0], dtype=np.int64) for agent_id in obs.keys()}
-            step_log = {agent_id: [0, 0] for agent_id in obs.keys()}
+            zero_action = np.zeros(self.action_dim, dtype=np.int64)
+            actions = {agent_id: zero_action.copy() for agent_id in obs.keys()}
+            step_log = {agent_id: zero_action.tolist() for agent_id in obs.keys()}
 
             trajectory.append(step_log)
             obs, rewards, terminated, truncated, info_dict = env.step(actions)
@@ -201,15 +70,6 @@ class ClimateMarlExperiment():
         return trajectory, per_agent_return, total_return, t, obs, info_dict
 
     def rollout_greedy_actions(self, algo, policy_mapping_fn, seed=None):
-        """
-        Run one greedy (deterministic) episode and return actions + rewards.
-
-        Returns:
-            trajectory: list of {agent_id -> action(list[int])} per step
-            per_agent_return: dict[agent_id -> float]
-            total_return: float
-            episode_len: int
-        """
         env = ClimateMARL(
             self.env_config,
             self.emission_data,
@@ -223,15 +83,12 @@ class ClimateMarlExperiment():
         t = 0
         trajectory = []
         per_agent_return = {f"country_{i}": 0.0 for i in range(self.env_config["N"])}
-        total_return = 0.0
 
-        # --- RNN state per agent (and per policy) ---
-        # RLlib LSTM expects a list [h, c] for TorchPolicy by default.
         rnn_state = {}
         for agent_id in obs.keys():
             pol_id = policy_mapping_fn(agent_id)
             pol = algo.get_policy(pol_id)
-            rnn_state[agent_id] = pol.get_initial_state()  # usually [h0, c0]
+            rnn_state[agent_id] = pol.get_initial_state()
 
         while not done:
             actions, step_log = {}, {}
@@ -240,14 +97,11 @@ class ClimateMarlExperiment():
                 pol_id = policy_mapping_fn(agent_id)
                 pol = algo.get_policy(pol_id)
 
-                # Deterministic (greedy) action; pass the current RNN state.
-                # compute_single_action handles batching for you.
                 act, new_state, _ = pol.compute_single_action(
                     agent_obs,
                     state=rnn_state[agent_id],
                     explore=False,
                 )
-                # Store next RNN state for this agent
                 rnn_state[agent_id] = new_state
 
                 actions[agent_id] = np.asarray(act, dtype=np.int64)
@@ -258,17 +112,23 @@ class ClimateMarlExperiment():
 
             for aid, r in rewards.items():
                 per_agent_return[aid] += float(r)
-                total_return += float(r)
 
             done = terminated.get("__all__", False) or truncated.get("__all__", False)
             t += 1
 
-        return trajectory, per_agent_return, total_return, t, obs, info_dict
+        return trajectory, per_agent_return, t, obs, info_dict
 
     def print_greedy_summary(self, greedy_traj):
-        # Map indices -> actual values
-        em_vals = np.asarray(self.actions_config["emission_actions"], dtype=float)   # e.g., [-0.05, ...]
-        pr_vals = np.asarray(self.actions_config["prevention_actions"], dtype=float) # e.g., [0.00, 0.02, ...]
+        if not greedy_traj:
+            return {}
+
+        lever_levels = {
+            name: np.asarray(self.actions_config["lever_levels"][name], dtype=float)
+            for name in self.lever_names
+        }
+        adaptation_levels = np.asarray(
+            self.actions_config["adaptation_levels"], dtype=float
+        )
 
         agents = [f"country_{i}" for i in range(self.env_config["N"])]
         T = len(greedy_traj)
@@ -279,104 +139,152 @@ class ClimateMarlExperiment():
 
         policy_logger = {}
         for ag in agents:
-            # Collect indices chosen each year
-            em_idx = [int(step[ag][0]) for step in greedy_traj]
-            pr_idx = [int(step[ag][1]) for step in greedy_traj]
-            # Convert to actual % values
-            em_series = [em_vals[i] * 100.0 for i in em_idx]  # percent
-            pr_series = [pr_vals[i] * 100.0 for i in pr_idx]  # percent
+            idx_matrix = np.array(
+                [np.asarray(step[ag], dtype=int) for step in greedy_traj], dtype=int
+            )
+
+            lever_series = {}
+            for j, name in enumerate(self.lever_names):
+                levels = lever_levels[name]
+                selections = np.clip(idx_matrix[:, j], 0, len(levels) - 1)
+                efforts = levels[selections]
+                lever_series[name] = efforts.tolist()
+
+            adapt_idx = np.clip(idx_matrix[:, self.adaptation_idx], 0, len(adaptation_levels) - 1)
+            adapt_levels = adaptation_levels[adapt_idx]
 
             print(f"- {ag}:")
-            print("  Emission delta (%):  " + ", ".join(f"{v:.1f}" for v in em_series))
-            print("  Prevention rate (%): " + ", ".join(f"{v:.1f}" for v in pr_series))
-            policy_logger[ag] = {"emission_delta": em_series, "prevention_rate": pr_series}
+            for name in self.lever_names:
+                series = lever_series[name]
+                print(
+                    f"  {name} effort (fraction): " + ", ".join(f"{v:.2f}" for v in series)
+                )
+            print(
+                "  adaptation investment (fraction): "
+                + ", ".join(f"{v:.2f}" for v in adapt_levels)
+            )
+
+            policy_logger[ag] = {
+                "lever_effort_fraction": lever_series,
+                "adaptation_investment_fraction": adapt_levels.tolist(),
+            }
 
         return policy_logger
 
     def register_env_rl(self):
         def env_creator(cfg):
-            # cfg is the single env_config RLlib passes.
             return ClimateMARL(
-                            cfg["env_config"],
-                            cfg["emission_data"],
-                            cfg["economics_config"],
-                            cfg["actions_config"],
-                            )
+                cfg["env_config"],
+                cfg["emission_data"],
+                cfg["economics_config"],
+                cfg["actions_config"],
+            )
 
         register_env("climate_marl", env_creator)
-    
+
     def run_marl_experiment(self):
-        # Prepare MARL
-        self.load_surrogate()
-        self.make_env_step_configs()
         self.register_env_rl()
 
-        # DO MARL
-        marl_env = ClimateMARL(self.env_config, 
-                               self.emission_data, 
-                               self.economics_config, 
-                               self.actions_config)
-        obs_sp = marl_env.observation_space("country_0")
-        act_sp = marl_env.action_space("country_0")
+        env = ClimateMARL(
+            self.env_config,
+            self.emission_data,
+            self.economics_config,
+            self.actions_config,
+        )
+        obs_sp = env.observation_space("country_0")
+        act_sp = env.action_space("country_0")
         N = self.env_config["N"]
 
-        # One policy per country (no sharing)
         policies = {f"country_{i}": (None, obs_sp, act_sp, {}) for i in range(N)}
-        policy_mapping_fn = lambda agent_id, *_, **__: agent_id
+        policy_mapping_fn = lambda agent_id, *_, **__: agent_id  # noqa: E731
+
+        ppo_cfg = self.training_cfg.get("ppo", {})
+        model_cfg = dict(ppo_cfg.get("model", {}))
+        model_cfg.setdefault("use_lstm", True)
+        model_cfg.setdefault("vf_share_layers", False)
+        model_cfg.setdefault("lstm_cell_size", 64)
+        model_cfg.setdefault("max_seq_len", self.env_config["horizon"])
+
+        train_batch_multiplier = ppo_cfg.get("train_batch_multiplier", 8)
+        minibatch_multiplier = ppo_cfg.get("minibatch_multiplier", 2)
+        train_batch_size = train_batch_multiplier * N * self.env_config["horizon"]
+        minibatch_size = minibatch_multiplier * N * self.env_config["horizon"]
+
+        lr_schedule = ppo_cfg.get("lr_schedule")
+        entropy_schedule = ppo_cfg.get("entropy_coeff_schedule")
+        rollout_cfg = ppo_cfg.get("rollout", {})
+        resources_cfg = ppo_cfg.get("resources", {})
+
+        fragment_length = rollout_cfg.get("fragment_length", self.env_config["horizon"])
+        if isinstance(fragment_length, str) and fragment_length.lower() == "horizon":
+            fragment_length = self.env_config["horizon"]
 
         base_config = (
-        PPOConfig()
-        .framework("torch")
-        .api_stack(enable_rl_module_and_learner=False, enable_env_runner_and_connector_v2=False)
-        .environment(
-            env="climate_marl",
-            env_config={
-                "env_config": self.env_config,
-                "emission_data": self.emission_data,
-                "economics_config": self.economics_config,
-                "actions_config": self.actions_config,
-            },
-        )
-        .training(     
-            model={
-                "use_lstm": True,
-                "lstm_cell_size": 64,
-                "max_seq_len": self.env_config["horizon"],
-                "vf_share_layers": False,
-            },
-            train_batch_size=8 * self.env_config["N"] * self.env_config["horizon"],  
-            minibatch_size=2 * self.env_config["N"] * self.env_config["horizon"],              
-            num_epochs=5,
-            gamma=0.999,
-            lr=2e-4,
-            lr_schedule=[[0, 2e-4], [150_000, 1e-4], [250_000, 5e-5]],
-            clip_param=0.3,     
-            entropy_coeff=0.02,
-            entropy_coeff_schedule=[[0, 0.02], [100_000, 0.01], [200_000, 0.003], [250_000, 0.001], [300_000, 0.0001]],
-        )
-
-        .multi_agent(policies=policies, policy_mapping_fn=policy_mapping_fn)
-        .resources(num_gpus=1)     
-        .env_runners(
-                rollout_fragment_length=self.env_config["horizon"],
+            PPOConfig()
+            .framework(ppo_cfg.get("framework", "torch"))
+            .api_stack(enable_rl_module_and_learner=False, enable_env_runner_and_connector_v2=False)
+            .environment(
+                env="climate_marl",
+                env_config={
+                    "env_config": self.env_config,
+                    "emission_data": self.emission_data,
+                    "economics_config": self.economics_config,
+                    "actions_config": self.actions_config,
+                },
+            )
+            .training(
+                model=model_cfg,
+                train_batch_size=train_batch_size,
+                minibatch_size=minibatch_size,
+                num_epochs=ppo_cfg.get("num_epochs", 5),
+                gamma=ppo_cfg.get("gamma", 0.999),
+                lr=ppo_cfg.get("lr", 2e-4),
+                clip_param=ppo_cfg.get("clip_param", 0.3),
+                entropy_coeff=ppo_cfg.get("entropy_coeff", 0.02),
+                lr_schedule=lr_schedule,
+                entropy_coeff_schedule=entropy_schedule,
+            )
+            .multi_agent(policies=policies, policy_mapping_fn=policy_mapping_fn)
+            .resources(num_gpus=resources_cfg.get("num_gpus", 0))
+            .env_runners(
+                rollout_fragment_length=fragment_length,
                 batch_mode="complete_episodes",
-                num_env_runners=1,
-                num_envs_per_env_runner=32,
-                num_gpus_per_env_runner=1,
-                sample_timeout_s=1200,
+                num_env_runners=rollout_cfg.get("num_env_runners", 1),
+                num_envs_per_env_runner=rollout_cfg.get("num_envs_per_runner", 1),
+                num_gpus_per_env_runner=rollout_cfg.get("num_gpus_per_env_runner", 0),
+                sample_timeout_s=rollout_cfg.get("sample_timeout_s", 1200),
             )
         )
-        base_config.seed = 42
+
+        base_config.seed = self.training_cfg.get("seed", 0)
         algo = base_config.build_algo()
 
-        ## Make folder in marl_results to save results
         timestamp = time.strftime("%Y%m%d_%H%M%S", time.localtime())
-        model_engine = self.env_config["engine"]
-        folder_name = f"{timestamp}_{model_engine}_heterogeneous"
-        results_dir = os.path.join("marl_results", folder_name)
-        os.makedirs(results_dir, exist_ok=False) # Make error if already exists
-        
-        num_iterations = 150
+        data_dir = Path(self.env_config["data_dir"])
+        if self.env_config['engine'] == 'net':
+            training_run_id = self.env_config['training_run_id']
+        else:
+            training_run_id = self.env_config['engine']
+        marl_run_name = self.env_config['run_name']
+        folder_name = f"{timestamp}_{training_run_id}_{marl_run_name}"
+
+        results_dir = Path(self.training_cfg["output_dir"])
+        results_dir = data_dir / results_dir
+        results_dir = results_dir / folder_name
+        results_dir.mkdir(parents=True, exist_ok=False)
+
+        with open(results_dir / "env_config.json", "w") as f:
+            json.dump(_to_jsonable(self.env_config), f, indent=4)
+        with open(results_dir / "economics_config.json", "w") as f:
+            json.dump(_to_jsonable(self.economics_config), f, indent=4)
+        with open(results_dir / "actions_config.json", "w") as f:
+            json.dump(_to_jsonable(self.actions_config), f, indent=4)
+        with open(results_dir / "training_config.json", "w") as f:
+            json.dump(_to_jsonable(self.training_cfg), f, indent=4)
+
+        num_iterations = self.training_cfg.get("num_iterations", 150)
+        eval_interval = max(1, self.training_cfg.get("greedy_eval_interval", 2))
+
         num_env_steps = 0
         per_agent_reward_logger_train = {}
         per_agent_reward_logger_greedy = {}
@@ -384,114 +292,69 @@ class ClimateMarlExperiment():
         temperature_logger = {}
         training_time_stats = {}
         t0 = time.time()
+
         for i in range(num_iterations):
-            # # Test fixed action baseline
-            trajectory, per_agent_return, total_return, t, obs, info_dict = self.rollout_fixed_actions()
-            print("[greedy] per-agent returns:", {k: round(v, 2) for k, v in per_agent_return.items()})
-            print("[greedy] temperature trajectory:", info_dict['country_0']['Temperature_trajectory'])
-            policy_logger = self.print_greedy_summary(trajectory)
+            # trajectory, per_agent_return, _, _, _, info_dict = self.rollout_fixed_actions()
+            # print("[fixed] per-agent returns:", {k: round(v, 2) for k, v in per_agent_return.items()})
+            # print("[fixed] temperature trajectory:", info_dict['country_0']['Temperature_trajectory'])
+            # self.print_greedy_summary(trajectory)
 
             result = algo.train()
-            # Per-agent (per-policy) mean rewards
             per_agent_rewards = result["env_runners"]["policy_reward_mean"]
             num_env_steps += result["env_runners"]["episodes_timesteps_total"]
 
             per_agent_reward_logger_train[num_env_steps] = per_agent_rewards
-            print(f"Per-agent eval rewards at iteration: {i} after {num_env_steps} timesteps")
+            print(f"Per-agent eval rewards at iteration {i} after {num_env_steps} timesteps")
             for policy_id, mean_rew in per_agent_rewards.items():
-                print(f"  {policy_id}: {mean_rew:.4f}")    
-            print(f"Timers:   {result['timers']}")
+                print(f"  {policy_id}: {mean_rew:.4f}")
 
             training_time_stats[num_env_steps] = time.time() - t0
 
-            if i % 2 == 0:
-                traj, agent_ret, total_ret, ep_len, obs_log, info_dict = self.rollout_greedy_actions(algo, policy_mapping_fn)
+            if i % eval_interval == 0:
+                traj, agent_ret, _, _, info_dict = self.rollout_greedy_actions(algo, policy_mapping_fn)
                 per_agent_reward_logger_greedy[num_env_steps] = agent_ret
                 print("[greedy] per-agent returns:", {k: round(v, 2) for k, v in agent_ret.items()})
                 print("[greedy] temperature trajectory:", info_dict['country_0']['Temperature_trajectory'])
                 policy_logger = self.print_greedy_summary(traj)
                 per_agent_policy_logger_greedy[num_env_steps] = policy_logger
                 temperature_logger[num_env_steps] = info_dict['country_0']['Temperature_trajectory']
-                
-                # Collect all results
-                policy_reward_intermediate_dict = {
+
+                intermediate = {
                     "train_reward": per_agent_reward_logger_train,
                     "greedy_reward": per_agent_reward_logger_greedy,
                     "temperature_trajectory": temperature_logger,
                     "greedy_policy": per_agent_policy_logger_greedy,
                     "training_time_stats": training_time_stats,
-                    }
-                
-                # Save algo results in results_dir as json
-                with open(os.path.join(results_dir, "marl_experiment_results_intermediate.json"), "w") as f:
-                    json.dump(policy_reward_intermediate_dict, f, indent=4)
+                }
+                with open(results_dir / "marl_experiment_results_intermediate.json", "w") as f:
+                    json.dump(intermediate, f, indent=4)
 
-            print("="*60)
+            print("=" * 60)
 
-        # Collect all results
-        policy_reward_dict = {
+        final_results = {
             "train_reward": per_agent_reward_logger_train,
             "greedy_reward": per_agent_reward_logger_greedy,
             "temperature_trajectory": temperature_logger,
             "greedy_policy": per_agent_policy_logger_greedy,
             "training_time_stats": training_time_stats,
-            }
-        
-        # Save algo results in results_dir as json
-        with open(os.path.join(results_dir, "marl_experiment_results.json"), "w") as f:
-            json.dump(policy_reward_dict, f, indent=4)
+        }
+        with open(results_dir / "marl_experiment_results.json", "w") as f:
+            json.dump(final_results, f, indent=4)
 
 
 def main():
-    # Load base data
-    gaspam_data, conc_data, em_data, nat_ch4_data, nat_n2o_data = load_core_data()
-    shifted = em_data.shift(1)
-    growth_base = em_data.divide(shifted.replace(0, np.nan))
-    baseline_emission_growth = growth_base.replace([np.inf, -np.inf], np.nan).fillna(1.0).loc[2015+1:]
-    historical_emissions = em_data.loc[:2015]
-    baseline_emissions = em_data.loc[2015:]
-    emission_shares = np.tile(np.array([0.05, 0.45, 0.05, 0.45]), (40, 1)).T
+    marl_config = load_yaml_config("marl.yaml", "marl")
+    env_config, emission_data, economics_config, actions_config, training_cfg = load_marl_setup(marl_config)
 
-    # Env config
-    env_config = {"N": 4, 
-                        "engine": "net", 
-                        "horizon": 35, 
-                        "G": 40, 
-                        "hist_end": 2015, 
-                        "future_end": 2050,
-                        "random_seed": 0}
+    experiment = ClimateMarlExperiment(
+        env_config,
+        emission_data,
+        economics_config,
+        actions_config,
+        training_cfg,
+    )
+    experiment.run_marl_experiment()
 
-    # Economic parameters per country
-    economics_config = {
-        "climate_disaster_sensitivity":       [100.00, 100.00, 25.00, 50.00],  # cost of climate change per temperature increase (per country)
-        "emission_reduction_sensitivity":     [100.00, 0.10, 10.00, 10.00],  # cost of having lower emissions (per country)
-        "climate_prevention_sensitivity":     [2.00, 2.00, 100.00, 100.00],  # cost of mitigation technologies (per country)
-        }
-    
-    # Actions
-    actions_config = {
-        "emission_actions": [-0.04, 0.0, 0.04],  # Deviation from baseline emission shares
-        "prevention_actions": [0.0, 0.03, 0.08]
-        }
-
-    emission_data = {
-        "historical_emissions": historical_emissions,
-        "baseline_emissions": baseline_emissions,
-        "emission_shares": emission_shares,
-        "baseline_emission_growth": baseline_emission_growth,
-        "gaspam_data": gaspam_data,
-        "conc_data": conc_data,
-        "nat_ch4_data": nat_ch4_data,
-        "nat_n2o_data": nat_n2o_data
-    }
-
-    # Register env
-    marl_env = ClimateMarlExperiment(env_config,
-                                    economics_config,
-                                    actions_config,
-                                    emission_data)
-    
-    marl_env.run_marl_experiment()
 
 if __name__ == "__main__":
     main()

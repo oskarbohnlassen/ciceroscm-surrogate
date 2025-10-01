@@ -1,6 +1,6 @@
 data_generation_params:
   num_samples: 100
-  alpha: 0.7
+  alpha: 0.8
   data_output_dir: /home/obola/repositories/cicero-scm-surrogate/data/
   specific_gas_bounds:
     CO2_FF:
@@ -15,6 +15,9 @@ data_generation_params:
     N2O:
       - 0.925
       - 1.075
+    SO2:
+      - 0.925
+      - 1.075
   remaining_gas_bounds:
-    - 0.995
-    - 1.005
+    - 1
+    - 1

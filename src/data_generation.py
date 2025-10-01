@@ -9,29 +9,23 @@ import pandas as pd
 import yaml
 from tqdm.auto import tqdm
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, os.path.join(os.getcwd(), '../ciceroscm/', 'src'))
 
 from ciceroscm.parallel.cscmparwrapper import run_ciceroscm_parallel
-import ciceroscm.input_handler as input_handler
-from utils import load_yaml_config
-
-
-CONFIG_DIR = Path(__file__).resolve().parent.parent / "config"
-
-
-def load_configs():
-    """Load CICERO and data-generation configuration files."""
-    cicero_config = load_yaml_config(CONFIG_DIR / "cicero-scm.yaml")
-    data_generation_config = load_yaml_config(
-        CONFIG_DIR / "data_generation.yaml", "data_generation_params"
-    )
-    return cicero_config, data_generation_config
+from src.utils.cicero_utils import load_cicero_inputs
+from src.utils.config_utils import load_yaml_config
 
 
 class DataGenerationPipeline:
     """Coordinate CICERO scenario generation from configuration values."""
 
-    def __init__(self, cicero_config: dict, data_generation_config: dict):
+    def __init__(self):
+        # Load configs
+        cicero_config = load_yaml_config("cicero-scm.yaml")
+        data_generation_config = load_yaml_config("data_generation.yaml", "data_generation_params")
+
         self.cicero_config = cicero_config
         self.data_generation_config = data_generation_config
         self.cfg = cicero_config["cfg"]
@@ -56,50 +50,22 @@ class DataGenerationPipeline:
 
         self.run_id = time.strftime("%Y%m%d_%H%M%S")
         self.data_output_dir_run = self.data_output_dir / self.run_id
+ 
+        (   self.gaspam_data,
+            self.conc_data,
+            self.em_data,
+            self.nat_ch4_data,
+            self.nat_n2o_data,
+        ) = load_cicero_inputs(self.cicero_config)
 
-    def load_core_data(self):
-        """Read fixed CICERO inputs needed for scenario generation."""
-        gaspam_data = input_handler.read_components(
-            str(self.test_data_dir / "gases_v1RCMIP.txt")
-        )
-
-        conc_data = input_handler.read_inputfile(
-            str(self.test_data_dir / "ssp245_conc_RCMIP.txt"),
-            True,
-            self.conc_data_first,
-            self.conc_data_last,
-        )
-
-        ih = input_handler.InputHandler(
-            {"nyend": self.em_data_end, "nystart": self.em_data_start, "emstart": self.em_data_policy}
-        )
-
-        em_data = ih.read_emissions(str(self.test_data_dir / "ssp245_em_RCMIP.txt"))
-        nat_ch4_data = input_handler.read_natural_emissions(
-            str(self.test_data_dir / "natemis_ch4.txt"), "CH4"
-        )
-
-        nat_n2o_data = input_handler.read_natural_emissions(
-            str(self.test_data_dir / "natemis_n2o.txt"), "N2O"
-        )
-
-        return gaspam_data, conc_data, em_data, nat_ch4_data, nat_n2o_data
-
-    def generate_scenarios(
-        self,
-        em_data,
-        nat_ch4_data,
-        nat_n2o_data,
-        gaspam_data,
-        conc_data,
-    ):
+    def generate_scenarios(self):
         """Sample emissions policies within configured bounds and smooth them."""
-        shifted = em_data.shift(1)
-        growth_base = em_data.divide(shifted.replace(0, np.nan))
+        shifted = self.em_data.shift(1)
+        growth_base = self.em_data.divide(shifted.replace(0, np.nan))
         growth_base = growth_base.replace([np.inf, -np.inf], np.nan).fillna(1.0)
 
         years_future = np.arange(self.em_data_policy, self.em_data_end + 1)
-        gas_cols = em_data.columns
+        gas_cols = self.em_data.columns
 
         scenarios = []
 
@@ -126,19 +92,19 @@ class DataGenerationPipeline:
 
             scale_df = pd.DataFrame(delta, index=years_future, columns=gas_cols)
 
-            em_policy = em_data.copy()
+            em_policy = self.em_data.copy()
             for t in years_future:
                 gfactor = growth_base.loc[t] * scale_df.loc[t]
                 em_policy.loc[t] = em_policy.loc[t - 1] * gfactor
 
             new_scen = {
-                "gaspam_data": gaspam_data,
+                "gaspam_data": self.gaspam_data,
                 "nyend": self.em_data_end,
                 "nystart": self.em_data_start,
                 "emstart": self.em_data_policy,
-                "concentrations_data": conc_data,
-                "nat_ch4_data": nat_ch4_data,
-                "nat_n2o_data": nat_n2o_data,
+                "concentrations_data": self.conc_data,
+                "nat_ch4_data": self.nat_ch4_data,
+                "nat_n2o_data": self.nat_n2o_data,
                 "emissions_data": em_policy,
                 "udir": str(self.test_data_dir),
                 "idtm": 24,
@@ -148,7 +114,7 @@ class DataGenerationPipeline:
 
         return scenarios
 
-    def run_scenarios(self, scenarios):
+    def _run_scenarios(self, scenarios):
         """Dispatch scenarios through the CICERO parallel wrapper."""
         output_variables = ["Surface Air Temperature Change"]
         return run_ciceroscm_parallel(scenarios, self.cfg, output_variables)
@@ -172,22 +138,15 @@ class DataGenerationPipeline:
         with open(configs_dir / "data_generation.yaml", "w") as f:
             yaml.safe_dump({"data_generation_params": self.data_generation_config}, f, sort_keys=False)
 
+    def run(self):
+        scenarios = self.generate_scenarios()
+        results = self._run_scenarios(scenarios)
+        self.save_raw_data(scenarios, results)
+        return scenarios, results
 
 def main():
-    cicero_config, data_generation_config = load_configs()
-    pipeline = DataGenerationPipeline(cicero_config, data_generation_config)
-
-    gaspam_data, conc_data, em_data, nat_ch4_data, nat_n2o_data = pipeline.load_core_data()
-    scenarios = pipeline.generate_scenarios(
-        em_data,
-        nat_ch4_data,
-        nat_n2o_data,
-        gaspam_data,
-        conc_data,
-    )
-    results = pipeline.run_scenarios(scenarios)
-    pipeline.save_raw_data(scenarios, results)
-
+    pipeline = DataGenerationPipeline()
+    pipeline.run()
 
 if __name__ == "__main__":
     main()

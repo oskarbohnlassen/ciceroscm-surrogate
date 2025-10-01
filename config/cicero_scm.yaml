@@ -7,7 +7,7 @@ cfg:
       beto: 6.89822
       lambda: 0.6062529
       mixed: 107.2422
-  - pamset_emiconc:
+    pamset_emiconc:
       qbmb: 0.0
       qo3: 0.5
       qdirso2: -0.3562

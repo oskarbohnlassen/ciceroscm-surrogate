@@ -1,49 +1,21 @@
 from gymnasium import spaces
 from ray.rllib.env import MultiAgentEnv
-from ray.rllib.algorithms.ppo import PPOConfig
-from ray.tune.registry import register_env
 
-import torch.nn as nn
 import sys
 import os
+from pathlib import Path
 import numpy as np
-import torch
-import pickle
-import time
 import copy
 import pandas as pd
-import importlib
-import matplotlib.pyplot as plt
-import ray
 
 sys.path.insert(0,os.path.join(os.getcwd(), '../ciceroscm/', 'src')) ## Make ciceroscm importable
 CURR_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, CURR_DIR)  # make 'train.py' and 'model.py' importable
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
 
 from marl_env_step import CICEROSCMEngine, CICERONetEngine
-
-
-class LSTMSurrogate(nn.Module):
-    def __init__(self, n_gas, hidden=64, num_layers=1):
-        super().__init__()
-        self.lstm = nn.LSTM(
-            input_size=n_gas,
-            hidden_size=hidden,
-            num_layers=num_layers,
-            batch_first=True,
-        )
-        self.out = nn.Sequential(
-            nn.Linear(hidden + n_gas, 64),
-            nn.GELU(),
-            nn.Linear(64, 1)  # ΔT_air only
-        )
-
-    def forward(self, x):                 # x: (B, 51, G)
-        hist, action = x[:, :-1, :], x[:, -1, :]  # (B,50,G), (B,G)
-        seq_out, _ = self.lstm(hist)      # seq_out: (B,50,H)
-        h_last = seq_out[:, -1, :]        # last timestep hidden: (B,H)
-        y_hat = self.out(torch.cat([h_last, action], dim=-1)).squeeze(1)
-        return y_hat
+from src.utils.model_utils import instantiate_model, load_state_dict, numpy_state_to_torch
 
 
 class ClimateMARL(MultiAgentEnv):
@@ -56,73 +28,149 @@ class ClimateMARL(MultiAgentEnv):
 
     def __init__(self, env_config, emission_data, economics_config, actions_config):
         super().__init__()
-        
-        # --- config dicts ---
-        rng = np.random.default_rng(env_config['random_seed'])
-      
+
+        self.env_config = env_config
+
         # --- core sizes/time ---
         self.N = int(env_config["N"])
-        self.G = int(env_config["G"])
-        
-        self.hist_end   = int(env_config["hist_end"])
+        self.horizon = int(env_config["horizon"])
+        self.hist_end = int(env_config["hist_end"])
         self.future_end = int(env_config["future_end"])
-        self.horizon    = int(env_config["horizon"])
-        self.engine_kind = str(env_config['engine']).lower()
-        
-        # --- provided data ---
-        self._hist_emissions_np = np.asarray(emission_data["historical_emissions"], dtype=np.float32).copy()
+        self.window_size = int(env_config["window_size"])
+        self.engine_kind = str(env_config["engine"]).lower()
+        self.rollout_length = int(env_config["rollout_length"])
+
+        # --- emissions data ---
         self._hist_emissions_pd = emission_data["historical_emissions"].copy()
-        self.baseline_emissions      = np.asarray(emission_data["baseline_emissions"], dtype=np.float32)
-        self.baseline_emission_growth = np.asarray(emission_data["baseline_emission_growth"], dtype=np.float32)
-        self.emission_shares         = np.asarray(emission_data["emission_shares"], dtype=np.float32)
-        self.baseline_emissions_agent = self.emission_shares[:, None, :] * self.baseline_emissions[None, :, :]
+        self._hist_emissions_np = np.asarray(self._hist_emissions_pd, dtype=np.float32)
+        self.baseline_emissions = np.asarray(emission_data["baseline_emissions"], dtype=np.float32)
+        self.baseline_emission_growth = np.asarray(
+            emission_data["baseline_emission_growth"], dtype=np.float32
+        )
 
-        # --- heterogeneous economics/impacts ---
-        self.climate_disaster_sensitivity     = np.asarray(economics_config['climate_disaster_sensitivity'], dtype=np.float32)     # (N,)
-        self.emission_reduction_sensitivity   = np.asarray(economics_config['emission_reduction_sensitivity'], dtype=np.float32)   # (N,)
-        self.climate_prevention_sensitivity   = np.asarray(economics_config['climate_prevention_sensitivity'], dtype=np.float32)   # (N,)
+        self.gas_names = list(emission_data["gas_names"])
+        self.G = len(self.gas_names)
 
-        self.prevention_decay = 0.95  # Each year the prevention stock decays by 5%
-        self.max_prevention_benefit = 0.5  # Maximum prevention 
-        
-        self._controllable_gases = 4  # first four indices
-        self.gas_slice = slice(0, self._controllable_gases)
+        name_to_index = {name: idx for idx, name in enumerate(self.gas_names)}
+        self.controlled_gases = list(env_config["controlled_gases"])
+        self.control_indices = np.array(
+            [name_to_index[name] for name in self.controlled_gases], dtype=np.int32
+        )
+        self._controllable_gases = len(self.control_indices)
+
+
+        emission_shares = np.asarray(emission_data["emission_shares"], dtype=np.float32)
+        if emission_shares.shape != (self.N, self.G):
+            raise ValueError(
+                f"emission_shares must have shape ({self.N}, {self.G}); got {emission_shares.shape}"
+            )
+        self.emission_shares = emission_shares
+        self.baseline_emissions_agent = (
+            self.emission_shares[:, None, :] * self.baseline_emissions[None, :, :]
+        )
+
+        baseline_control = self.baseline_emissions[0, self.control_indices]
+        baseline_control_mean = float(np.mean(baseline_control))
+        self._cum_scale = max(1.0, baseline_control_mean * max(1, self.horizon))
+        self._emission_scale = max(1.0, baseline_control_mean)
+
         self.last_agent_emissions = np.zeros((self.N, self.G), dtype=np.float32)
-        self.cumulative_emission_delta = np.zeros((self.N, self._controllable_gases), dtype=np.float32)
+        self.cumulative_emission_delta = np.zeros(
+            (self.N, self._controllable_gases), dtype=np.float32
+        )
 
         # --- actions ---
-        self.emission_actions = np.asarray(actions_config['emission_actions'], dtype=np.float32)  # -5% to +5% emission changes
-        self.prevention_actions = np.asarray(actions_config['prevention_actions'], dtype=np.float32)  # 0%, 2%, 5%, 8% of damage reduction
-        self.prevention_stock = np.zeros(self.N, dtype=np.float32) # Current prevention stock (decays over time)
-        self._act_space = spaces.MultiDiscrete([len(self.emission_actions), len(self.prevention_actions)])
+        self.lever_names = list(actions_config["lever_names"])
+        if not self.lever_names:
+            raise ValueError("At least one mitigation lever must be specified")
 
-        baseline_emissions_first_year = float(np.mean(self.baseline_emissions[0][:self._controllable_gases]))
-        self._cum_scale = max(1.0, baseline_emissions_first_year * max(1, self.horizon))
-        self._emission_scale = max(1.0, float(np.mean(self.baseline_emissions[0][:self._controllable_gases])))
+        self.lever_count = len(self.lever_names)
+        lever_levels_cfg = actions_config["lever_levels"]
+        self.lever_levels = []  # list of np.ndarray per lever (ascending order)
+        for name in self.lever_names:
+            levels = np.asarray(lever_levels_cfg[name], dtype=np.float32)
+            if levels.ndim != 1 or levels.size == 0:
+                raise ValueError(f"Lever '{name}' levels must be a non-empty 1D array")
+            self.lever_levels.append(levels)
+
+        self.policy_matrix = np.asarray(actions_config["policy_matrix"], dtype=np.float32)
+        if self.policy_matrix.shape != (self.lever_count, self._controllable_gases):
+            raise ValueError(
+                "policy_matrix must have shape (num_levers, num_controlled_gases); "
+                f"got {self.policy_matrix.shape}, expected ({self.lever_count}, {self._controllable_gases})"
+            )
+
+        self.adaptation_levels = np.asarray(
+            actions_config["adaptation_levels"], dtype=np.float32
+        )
+        if self.adaptation_levels.ndim != 1 or self.adaptation_levels.size == 0:
+            raise ValueError("Adaptation levels must be a non-empty 1D array")
+
+        self.action_sizes = [len(levels) for levels in self.lever_levels]
+        self.action_sizes.append(int(self.adaptation_levels.size))
+
+        # --- heterogeneous economics/impacts ---
+        costs_cfg = economics_config["costs"]
+        self.climate_damage_costs = np.asarray(
+            costs_cfg["climate_damage_costs"], dtype=np.float32
+        )
+        if self.climate_damage_costs.shape != (self.N,):
+            raise ValueError(
+                "economics.costs.climate_damage_costs must have length equal to num_agents"
+            )
+
+        self.adaptation_costs = np.asarray(
+            costs_cfg["adaptation_costs"], dtype=np.float32
+        )
+        if self.adaptation_costs.shape != (self.N,):
+            raise ValueError(
+                "economics.costs.adaptation_costs must have length equal to num_agents"
+            )
+
+        lever_costs = np.zeros((self.N, self.lever_count), dtype=np.float32)
+        for idx, name in enumerate(self.lever_names):
+            key = f"{name}_costs"
+            if key not in costs_cfg:
+                raise ValueError(f"Missing economics cost vector for lever '{name}'")
+            arr = np.asarray(costs_cfg[key], dtype=np.float32)
+            if arr.shape != (self.N,):
+                raise ValueError(
+                    f"economics.costs.{key} must have length {self.N}, got {len(arr)}"
+                )
+            lever_costs[:, idx] = arr
+        self.lever_costs = lever_costs
+
+        self.prevention_decay = float(economics_config.get("prevention_decay", 0.95))
+        self.max_prevention_benefit = float(
+            economics_config.get("max_prevention_benefit", 0.5)
+        )
+
+        self.prevention_stock = np.zeros(self.N, dtype=np.float32)
+        self._act_space = spaces.MultiDiscrete(self.action_sizes)
 
         # --- agents  ---
         self.agents = [f"country_{i}" for i in range(self.N)]
 
-        # --- spaces ---
+        # --- observation space ---
         obs_low = np.concatenate([
             np.array([0.0, 0.0], dtype=np.float32),
-            np.zeros(self.N * self._controllable_gases, dtype=np.float32), # last emissions
-            np.full(self.N * self._controllable_gases, -100.0, dtype=np.float32), # large cumulative emissions
-            np.zeros(self.N, dtype=np.float32), # prevention stock cap
+            np.zeros(self.N * self._controllable_gases, dtype=np.float32),
+            np.full(self.N * self._controllable_gases, -100.0, dtype=np.float32),
+            np.zeros(self.N, dtype=np.float32),
         ])
         obs_high = np.concatenate([
             np.array([3.0, 1.0], dtype=np.float32),
-            np.full(self.N * self._controllable_gases, 100.0, dtype=np.float32), # last emissions
-            np.full(self.N * self._controllable_gases, 100.0, dtype=np.float32), # large cumulative emissions
-            np.ones(self.N, dtype=np.float32), # prevention stock cap
+            np.full(self.N * self._controllable_gases, 100.0, dtype=np.float32),
+            np.full(self.N * self._controllable_gases, 100.0, dtype=np.float32),
+            np.ones(self.N, dtype=np.float32),
         ])
         self._obs_space = spaces.Box(obs_low, obs_high, dtype=np.float32)
         self.observation_spaces = {a: self._obs_space for a in self.agents}
-        self.action_spaces      = {a: self._act_space for a in self.agents}
+        self.action_spaces = {a: self._act_space for a in self.agents}
 
-        # --- model parameters ---
-        self.net_params = env_config["net_params"]
-        self.scm_params = env_config["scm_params"]
+        # --- engine parameters ---
+        self.net_params = env_config.get("net_params")
+        self.scm_params = env_config.get("scm_params")
 
         # internal state
         self.reset()
@@ -136,6 +184,8 @@ class ClimateMARL(MultiAgentEnv):
     def _make_scm_engine(self):
 
         p = self.scm_params
+        if p is None:
+            raise ValueError("scm_params must be provided when engine='scm'")
         
         return CICEROSCMEngine(
             historical_emissions=self._hist_emissions_pd.copy(),
@@ -154,26 +204,32 @@ class ClimateMARL(MultiAgentEnv):
 
     def _make_net_engine(self):            
         p = self.net_params
+        if p is None:
+            raise ValueError("net_params must be provided when engine='net'")
+
         device = p["device"]
+        model = instantiate_model(
+            p["model_type"],
+            p["n_gas"],
+            p["hidden"],
+            p["num_layers"],
+            kernel_size=p.get("kernel_size", 3),
+            device=device,
+        )
+        state = numpy_state_to_torch(p["state_dict_np"], device)
+        load_state_dict(model, state)
 
-        # Recreate a torch state dict from numpy:
-        state = {k: torch.from_numpy(arr).to(device) for k, arr in p["state_dict_np"].items()}
-
-        # Initialize model
-        m = LSTMSurrogate(n_gas=40, hidden=256, num_layers=2).to(device)
-        m.load_state_dict(state, strict=True)
-        m.eval()
-        for param in m.parameters():
-            param.requires_grad_(False)
+        hist_subset = self._hist_emissions_np[:, self.control_indices]
 
         return CICERONetEngine(
-            historical_emissions=self._hist_emissions_np.copy(),
-            model=m,
+            historical_emissions=hist_subset,
+            model=model,
             device=device,
             mu=np.asarray(p["mu"], np.float32),
             std=np.asarray(p["std"], np.float32),
-            autocast = p["autocast"],
-            use_half = p["use_half"]
+            autocast=p.get("autocast", False),
+            use_half=p.get("use_half", False),
+            window_size=self.window_size,
         )
 
     def _current_observation(self):
@@ -181,7 +237,7 @@ class ClimateMARL(MultiAgentEnv):
         year_idx = float(self.year_idx - (self.hist_end + 1))
         year_idx_norm = year_idx / self.horizon # normalize to [0..1]
 
-        self.last_controlled_emissions = self.last_agent_emissions[:, self.gas_slice]
+        self.last_controlled_emissions = self.last_agent_emissions[:, self.control_indices]
 
         emissions_flat = (self.last_controlled_emissions / self._emission_scale).flatten().astype(np.float32)
         cumulative_flat = (self.cumulative_emission_delta / self._cum_scale).flatten().astype(np.float32)
@@ -217,6 +273,8 @@ class ClimateMARL(MultiAgentEnv):
             self.engine = self._make_scm_engine()
         elif self.engine_kind == "net":
             self.engine = self._make_net_engine()
+        else:
+            raise ValueError(f"Unsupported climate engine kind: {self.engine_kind}")
 
         #self.net_engine = self._make_net_engine()
 
@@ -226,96 +284,124 @@ class ClimateMARL(MultiAgentEnv):
 
     def step(self, action_dict):
         # Year
-        idx = self.year_idx - (self.hist_end + 1)   # 2016 → 0, …, 2050 → 34
+        idx = self.year_idx - (self.hist_end + 1)  
 
-        # Parse separate actions for emission and prevention
-        emission_indices = np.array([action_dict[ag][0] for ag in self.agents], dtype=np.int32)
-        prevention_indices = np.array([action_dict[ag][1] for ag in self.agents], dtype=np.int32)
-        emission_changes = self.emission_actions[emission_indices]  # -4%, 0%, +4% emission changes
-        prevention_rates = self.prevention_actions[prevention_indices]  # 0%, 3%, 8% of damage reduction    
-        
-        # Prevention
-        self.prevention_stock = (self.prevention_stock * self.prevention_decay) + prevention_rates
-        self.prevention_stock = np.clip(self.prevention_stock, 0.0, self.max_prevention_benefit)
-    
+        # Parse lever and adaptation actions
+        action_matrix = np.vstack([
+            np.asarray(action_dict[ag], dtype=np.int32) for ag in self.agents
+        ])
+        if action_matrix.shape[1] != self.lever_count + 1:
+            raise ValueError(
+                f"Expected action dimension {self.lever_count + 1}, got {action_matrix.shape[1]}"
+            )
+
+        lever_indices = action_matrix[:, : self.lever_count]
+        adaptation_indices = action_matrix[:, self.lever_count]
+
+        lever_efforts = np.zeros((self.N, self.lever_count), dtype=np.float32)
+        for j, levels in enumerate(self.lever_levels):
+            lever_efforts[:, j] = levels[np.clip(lever_indices[:, j], 0, len(levels) - 1)]
+
+        adaptation_selected = self.adaptation_levels[
+            np.clip(adaptation_indices, 0, len(self.adaptation_levels) - 1)
+        ]
+
+        # Adaptation stock update
+        self.prevention_stock = (
+            self.prevention_stock * self.prevention_decay
+        ) + adaptation_selected
+        self.prevention_stock = np.clip(
+            self.prevention_stock, 0.0, self.max_prevention_benefit
+        )
+
         # Emission growth rate
         baseline_growth_year = self.baseline_emission_growth[idx] # 2016..2050 as baseline growth starts from 2016
+        #print(f"Baseline growth year {self.year_idx}: {baseline_growth_year}")
         baseline_growth_per_agent = np.broadcast_to(baseline_growth_year, (self.N, self.G)).copy()
-        baseline_growth_per_agent[:, self.gas_slice] *= (1.0 + emission_changes)[:, None]
-
+        delta_growth = lever_efforts @ self.policy_matrix  # (N, controlled_gases)
+        baseline_growth_per_agent[:, self.control_indices] *= (1.0 + delta_growth)
+        #print(f"Baseline growth altered with lever efforts: {delta_growth} yielding: {baseline_growth_per_agent}")
         # Emissions actual
         emission_agents = self.last_agent_emissions * baseline_growth_per_agent 
-        emission_agents[:, self.gas_slice] = np.clip(emission_agents[:, self.gas_slice], 0.0, None)
+        emission_agents[:, self.control_indices] = np.clip(
+            emission_agents[:, self.control_indices], 0.0, None
+        )
 
         emission_global = emission_agents.sum(axis=0)  # (G,)
         self.last_agent_emissions[...] = emission_agents
 
         # Cummulative delta emissions
         base_agent_year = self.baseline_emissions_agent[:, idx+1, :]  # (N, G) → year = 2016+idx
-        delta_from_baseline = (emission_agents[:, self.gas_slice] - base_agent_year[:, self.gas_slice]).astype(np.float32)
+        delta_from_baseline = (
+            emission_agents[:, self.control_indices] - base_agent_year[:, self.control_indices]
+        ).astype(np.float32)
         self.cumulative_emission_delta += delta_from_baseline
 
         # Step climate engine
-        T_next = self.engine.step(emission_global)
-        # print(f"SCM engine temperature: {T_next}")
-        # T_next = self.net_engine.step(emission_global)
-        # print(f"Net engine temperature: {T_next}")
-
+        engine_input = (
+            emission_global[self.control_indices]
+            if self.engine_kind == "net"
+            else emission_global
+        )
+        T_next = self.engine.step(engine_input)
         self._temp_log.append(T_next)
     
         # (A) Climate disasters cost per agent
         global_climate_cost_denominator_x = 0.003 * (T_next ** 2)
         global_climate_cost = (global_climate_cost_denominator_x / (1.0 + global_climate_cost_denominator_x))
-        agent_disaster_cost = global_climate_cost * self.climate_disaster_sensitivity * (1-self.prevention_stock) # (N,)
+        agent_disaster_cost = global_climate_cost * self.climate_damage_costs * (1 - self.prevention_stock)
 
-        # (B) Climate reduction cost per agent
-        cut = np.maximum(0.0, -emission_changes)  
-        emission_reduction_cost = self.emission_reduction_sensitivity * cut
+        # (B) Mitigation lever costs per agent (convex in effort)
+        lever_cost = np.sum(self.lever_costs * (lever_efforts ** 2), axis=1)
 
-        # (C) Climate prevention cost per agent
-        prevention_cost = self.climate_prevention_sensitivity * prevention_rates  # (N,)
-
-        #print(f"All reward components: Disaster: {agent_disaster_cost}, Emission reduction: {emission_reduction_cost}, Prevention: {prevention_cost}")
+        # (C) Adaptation investment cost per agent
+        adaptation_cost = self.adaptation_costs * adaptation_selected
 
         # Total reward
-        r = - (agent_disaster_cost + emission_reduction_cost + prevention_cost)
+        r = - (agent_disaster_cost + lever_cost + adaptation_cost)
         r *= 1e-1
-        #print(f"Rewards per agent: {r}")
-        #print("-----------------------------------------------------")
 
-        # Update time 
+        # print(f"Reward components at year {self.year_idx}:")
+        # print(f"  - Climate disaster cost: {agent_disaster_cost}")
+        # print(f"  - Mitigation lever cost: {lever_cost}")
+        # print(f"  - Adaptation investment cost: {adaptation_cost}")
+
+        # Update time
         self.t += 1
         self.year_idx += 1
         done = (self.t >= self.horizon) or (self.year_idx > self.future_end)    
 
         # Update observation
         obs_vec = self._current_observation()
-        #print(f"Obs vec: {obs_vec} \n")
         obs_d = {agent: obs_vec.copy() for agent in self.agents}      
         info_d = {a: {} for a in self.agents}
 
         if done:
             terminal_damage = np.zeros(self.N, dtype=np.float32)
 
-            for year_ahead_idx in range(5):
+            for year_ahead_idx in range(self.rollout_length):
                 idx += 1
-                baseline_growth_year = self.baseline_emission_growth[idx] # 2016..2050 as baseline growth starts from 2016
+                baseline_growth_year = self.baseline_emission_growth[idx] 
                 baseline_growth_per_agent = np.broadcast_to(baseline_growth_year, (self.N, self.G)).copy()
 
                 emission_agents = self.last_agent_emissions * baseline_growth_per_agent 
-                emission_agents[:, self.gas_slice] = np.clip(emission_agents[:, self.gas_slice], 0.0, None)
+                emission_agents[:, self.control_indices] = np.clip(
+                    emission_agents[:, self.control_indices], 0.0, None
+                )
                 emission_global = emission_agents.sum(axis=0)  # (G,)
                 self.last_agent_emissions[...] = emission_agents
 
-                T_next = self.engine.step(emission_global)
-                # print(f"TERMINAL: SCM engine temperature: {T_next}")
-                # T_next = self.net_engine.step(emission_global)
-                # print(f"TERMINAL: Net engine temperature: {T_next}")
+                engine_input = (
+                    emission_global[self.control_indices]
+                    if self.engine_kind == "net"
+                    else emission_global
+                )
+                T_next = self.engine.step(engine_input)
                 self._temp_log.append(T_next)
 
                 global_climate_cost_denominator_x = 0.003 * (T_next ** 2)
                 global_climate_cost = (global_climate_cost_denominator_x / (1.0 + global_climate_cost_denominator_x))
-                agent_disaster_cost = global_climate_cost * self.climate_disaster_sensitivity * (1-self.prevention_stock) # (N,)
+                agent_disaster_cost = global_climate_cost * self.climate_damage_costs * (1 - self.prevention_stock)
                 terminal_damage += agent_disaster_cost * 1e-1
 
             r = r - terminal_damage

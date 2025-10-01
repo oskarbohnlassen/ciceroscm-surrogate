@@ -1,31 +1,14 @@
-from gymnasium import spaces
-from ray.rllib.env import MultiAgentEnv
-from ray.rllib.algorithms.ppo import PPOConfig
-from ray.tune.registry import register_env
-
 import sys
 import os
 import numpy as np
 import torch
-import pickle
-import time
 import copy
-import pandas as pd
-import importlib
-import matplotlib.pyplot as plt
-import ray
 
 sys.path.insert(0,os.path.join(os.getcwd(), '../ciceroscm/', 'src')) ## Make ciceroscm importable
 CURR_DIR = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, CURR_DIR)  # make 'train.py' and 'model.py' importable
+sys.path.insert(0, CURR_DIR)
 
 from ciceroscm import CICEROSCM
-from ciceroscm.parallel.cscmparwrapper import run_ciceroscm_parallel
-import ciceroscm.input_handler as input_handler
-from train import load_processed_data, format_data
-from model import LSTMSurrogate
-from data_generation import load_core_data
-
 
 class CICEROSCMEngine:
     """
@@ -150,10 +133,19 @@ class CICERONetEngine:
     use_half : bool
         Use float16 inside autocast; otherwise run in float32.
     """
-    def __init__(self, historical_emissions, model, device="cuda:0",
-                 mu=None, std=None, autocast=True, use_half=True):
+    def __init__(
+        self,
+        historical_emissions,
+        model,
+        device="cuda:0",
+        mu=None,
+        std=None,
+        autocast=True,
+        use_half=True,
+        window_size=65,
+    ):
 
-        self.W = int(65)
+        self.window = int(window_size)
         self.device = torch.device(device)
         self.model = model.eval().to(self.device)
         self.use_half = bool(use_half) and (self.device.type == "cuda")
@@ -164,14 +156,20 @@ class CICERONetEngine:
         torch.backends.cudnn.benchmark = True
         torch.set_float32_matmul_precision("high")    
 
-        # ---- keep exactly the last 50 rows (t-50..t-1) as the rolling buffer ----
-        hist_tail = np.asarray(historical_emissions[-self.W:], dtype=np.float32)   # (50, G)
+        if historical_emissions.shape[0] < self.window:
+            raise ValueError(
+                "historical_emissions has fewer rows than window_size "
+                f"({historical_emissions.shape[0]} < {self.window})"
+            )
+
+        # ---- keep exactly the last W rows (t-W..t-1) as the rolling buffer ----
+        hist_tail = np.asarray(historical_emissions[-self.window :], dtype=np.float32)
         self.G = hist_tail.shape[1]
         self.buf = torch.from_numpy(hist_tail).to(self.device, non_blocking=True)  # (50, G)
 
         # Model input is (1, 51, G)
         dtype = torch.float16 if self.use_half else torch.float32
-        self.x = torch.empty((1, self.W + 1, self.G), device=self.device, dtype=dtype)
+        self.x = torch.empty((1, self.window + 1, self.G), device=self.device, dtype=dtype)
 
         # Optional per-gas normalization stats (on device, dtype-matched)
         self.mu  = None if mu  is None else torch.as_tensor(mu,  device=self.device, dtype=self.x.dtype)
@@ -189,10 +187,10 @@ class CICERONetEngine:
         """
         e = torch.as_tensor(E_t, device=self.device, dtype=self.buf.dtype)  # (G,)
 
-        # Build (51, G) input: first the 50 past rows …
-        self.x[0, :self.W].copy_(self.buf, non_blocking=True)
+        # Build (window+1, G) input: first the historical rows …
+        self.x[0, : self.window].copy_(self.buf, non_blocking=True)
         # … then append current action-year emissions
-        self.x[0, self.W].copy_(e, non_blocking=True)
+        self.x[0, self.window].copy_(e, non_blocking=True)
 
         # Normalize inputs if stats provided: (x - mu)/std (broadcast over time)
         if (self.mu is not None) and (self.std is not None):
@@ -208,7 +206,7 @@ class CICERONetEngine:
         T_next = float(out.squeeze().item())
         self.T = T_next
 
-        # Update the rolling 50-year buffer for the next call: drop oldest, append E_t
+        # Update the rolling buffer for the next call: drop oldest, append E_t
         self.buf = torch.roll(self.buf, shifts=-1, dims=0)
         self.buf[-1].copy_(e, non_blocking=True)
 
