@@ -19,12 +19,6 @@ from src.utils.model_utils import instantiate_model, load_state_dict, numpy_stat
 
 
 class ClimateMARL(MultiAgentEnv):
-    """
-    N agents (countries). Each year they pick a deviation a_i from their baseline share.
-    Total emissions E_t (40 gases) feed a climate engine (CICERO-NET or CICERO-SCM).
-    Observation (same for all agents): [T_t, year_norm, B_t(40)].
-    Reward_i = xxx
-    """
 
     def __init__(self, env_config, emission_data, economics_config, actions_config):
         super().__init__()
@@ -250,7 +244,6 @@ class ClimateMARL(MultiAgentEnv):
             prevention_stock,
             ])
         
-        #print(f"Obs vec: {obs_vec} \n")
         return obs_vec
     
     def reset(self, *, seed=None, options=None):
@@ -258,7 +251,8 @@ class ClimateMARL(MultiAgentEnv):
             _ = np.random.default_rng(seed)
         
         self._temp_log = []
-
+        self._E_global_log = []               # (G,) per step
+        self._years_log = []                  # years per MARL step (no terminal rollout)
 
         self.t = 0
         self.year_idx = self.hist_end + 1  # 2016
@@ -345,11 +339,13 @@ class ClimateMARL(MultiAgentEnv):
         )
         T_next = self.engine.step(engine_input)
         self._temp_log.append(T_next)
+        self._years_log.append(int(self.year_idx))
+        self._E_global_log.append(emission_global.astype(np.float32))
     
         # (A) Climate disasters cost per agent
-        global_climate_cost_denominator_x = 0.003 * (T_next ** 2)
-        global_climate_cost = (global_climate_cost_denominator_x / (1.0 + global_climate_cost_denominator_x))
-        agent_disaster_cost = global_climate_cost * self.climate_damage_costs * (1 - self.prevention_stock)
+        phi = 0.003
+        global_climate_cost = phi * (T_next ** 4)
+        agent_disaster_cost = global_climate_cost * self.climate_damage_costs * (1.0 - self.prevention_stock)
 
         # (B) Mitigation lever costs per agent (convex in effort)
         lever_cost = np.sum(self.lever_costs * (lever_efforts ** 2), axis=1)
@@ -380,7 +376,7 @@ class ClimateMARL(MultiAgentEnv):
             terminal_damage = np.zeros(self.N, dtype=np.float32)
 
             for year_ahead_idx in range(self.rollout_length):
-                idx += 1
+                idx = self.year_idx - (self.hist_end + 1)
                 baseline_growth_year = self.baseline_emission_growth[idx] 
                 baseline_growth_per_agent = np.broadcast_to(baseline_growth_year, (self.N, self.G)).copy()
 
@@ -398,16 +394,43 @@ class ClimateMARL(MultiAgentEnv):
                 )
                 T_next = self.engine.step(engine_input)
                 self._temp_log.append(T_next)
+                self._years_log.append(int(self.year_idx))
+                self._E_global_log.append(emission_global.astype(np.float32))
 
-                global_climate_cost_denominator_x = 0.003 * (T_next ** 2)
-                global_climate_cost = (global_climate_cost_denominator_x / (1.0 + global_climate_cost_denominator_x))
-                agent_disaster_cost = global_climate_cost * self.climate_damage_costs * (1 - self.prevention_stock)
+                # Base curvature (covers all temps)
+                phi = 0.003
+                global_climate_cost = phi * (T_next ** 4)
+                agent_disaster_cost = global_climate_cost * self.climate_damage_costs * (1.0 - self.prevention_stock)
+
                 terminal_damage += agent_disaster_cost * 1e-1
+                self.year_idx += 1
+
 
             r = r - terminal_damage
+
             for a in self.agents:
-                info_d[a] = {"Temperature_trajectory": self._temp_log}
-                    
+                info_d[a]["Temperature_trajectory"] = self._temp_log
+
+            if self.env_config["log_episode_trajectories"]:
+                years_arr = np.asarray(self._years_log, dtype=np.int16)                # shape (T,)
+                E_global_arr = np.stack(self._E_global_log, axis=0)                    # shape (T, G)
+                T_arr = np.asarray(self._temp_log, dtype=np.float32)  # shape (T,)
+                log_dir = Path(self.env_config["log_dir"])
+                results_dir = Path(self.env_config["output_dir"])
+                log_dir = results_dir / log_dir
+                if log_dir:
+                    os.makedirs(log_dir, exist_ok=True)
+                    # Simple deterministic-ish filename
+                    ep_id = f"ep_{np.random.randint(1e9)}"
+                    np.savez_compressed(
+                        os.path.join(log_dir, f"{ep_id}.npz"),
+                        years=years_arr,                 # (T,)
+                        E_global=E_global_arr,           # (T, G)
+                        T=T_arr,                         # (T,)
+                        gas_names=np.array(self.gas_names, dtype=object),
+                    )
+
+
         # Additional info
         rew_d   = {a: float(x) for a, x in zip(self.agents, r)}
         term_d  = {a: done for a in self.agents}

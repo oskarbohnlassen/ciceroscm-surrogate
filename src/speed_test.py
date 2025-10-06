@@ -241,7 +241,10 @@ class SpeedTestPipeline:
                 device="cuda", use_half=self.use_half, autocast=self.autocast
             )
 
-        cicero_latencies = self._measure_cicero_latencies()
+        if self.config['include_cicero_latencies'] == True:
+            cicero_latencies = self._measure_cicero_latencies()
+        else:
+            cicero_latencies = np.array([], dtype=float)
 
         surrogate_npz_payload = {
             f"{device}_latencies": arr for device, arr in surrogate_latencies.items()

@@ -14,23 +14,6 @@ class CICEROSCMEngine:
     """
     Reference engine that consumes full history 1900..t (G=40),
     calls CICEROSCM each step, and returns next-year temperature.
-
-    Usage:
-        eng = CICEROSCMEngine(
-            historical_emissions=historical_emissions_np,
-            gaspam_data=gaspam_data,
-            conc_data=conc_data,
-            nat_ch4_data=nat_ch4_data,
-            nat_n2o_data=nat_n2o_data,
-            pamset_udm=cfg[0]["pamset_udm"],
-            pamset_emiconc=cfg[0]["pamset_emiconc"],
-            em_data_start=1900,
-            em_data_policy=2015,
-            udir=test_data_dir,  # your output dir
-            idtm=24,
-            scenname="rl_scenario",
-        )
-        T, info = eng.step(E_t)   # E_t shape (G,)
     """
     def __init__(
         self,
@@ -111,28 +94,6 @@ class CICEROSCMEngine:
 
 
 class CICERONetEngine:
-    """
-    Inference engine for a CICERO-NET model trained on inputs shaped (51, G):
-      [50 past years; current year's emissions], target = T_{t+1}.
-
-    Args
-    ----
-    historical_emissions : np.ndarray, shape (T_hist, G)
-        Full history up to and including 2015. We keep the last 50 rows.
-    model : torch.nn.Module
-        Trained surrogate (expects (B, 51, G) and returns (B, 1) or (B,)).
-    device : str
-        "cuda:0"
-    window : int
-        Number of historical years (should be 50 to match training).
-    mu, std : np.ndarray or torch.Tensor, shape (G,), optional
-        Per-gas normalization used at training for the 51×G inputs.
-        If None, no normalization is applied.
-    autocast : bool
-        Enable mixed precision (only meaningful on CUDA when use_half=True).
-    use_half : bool
-        Use float16 inside autocast; otherwise run in float32.
-    """
     def __init__(
         self,
         historical_emissions,
@@ -179,12 +140,6 @@ class CICERONetEngine:
 
     @torch.inference_mode()
     def step(self, E_t):
-        """
-        Feed [buf(50,G); E_t(1,G)] → model → T_{t+1}; then roll buf to include E_t.
-        E_t : array-like, shape (G,)
-        Returns:
-            float temperature prediction for next year.
-        """
         e = torch.as_tensor(E_t, device=self.device, dtype=self.buf.dtype)  # (G,)
 
         # Build (window+1, G) input: first the historical rows …

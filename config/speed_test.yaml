@@ -1,8 +1,9 @@
 speed_test:
   data_run: /home/obola/repositories/cicero-scm-surrogate/data/20250930_223742
-  training_run: training_runs/20251001_104419_lstm_128_1
+  training_run: training_runs/20251002_081632_gru_128_1
   use_half: false
   autocast: false
-  max_samples: 20
+  max_samples: 100
   warmup_steps: 10
   output_dir_name: speed_tests
+  include_cicero_latencies: False

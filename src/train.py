@@ -20,7 +20,6 @@ from src.utils.model_utils import instantiate_model, parse_model_config
 from src.utils.train_utils import validation_metrics
 
 class TrainingPipeline:
-    """Train surrogate models using processed CICERO datasets."""
 
     def __init__(self):
         config = load_yaml_config("train.yaml")

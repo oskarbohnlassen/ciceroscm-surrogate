@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 import torch
+import time
 
 from src.utils.cicero_utils import load_cicero_inputs  # noqa: E402
 from src.utils.config_utils import (
@@ -77,12 +78,31 @@ def load_marl_setup(cfg):
         "data_dir": general_cfg["data_dir"],
         "training_run_id": general_cfg["training_run_id"],
         "rollout_length": int(env_cfg["rollout_length"]),
+        "log_episode_trajectories": bool(general_cfg["log_episode_trajectories"]),
+        "log_dir": general_cfg["log_dir"],
     }
+
+    timestamp = time.strftime("%Y%m%d_%H%M%S", time.localtime())
+    data_dir = Path(env_config["data_dir"])
+    if env_config['engine'] == 'net':
+        training_run_id = env_config['training_run_id']
+    else:
+        training_run_id = env_config['engine']
+    marl_run_name = env_config['run_name']
+    folder_name = f"{timestamp}_{training_run_id}_{marl_run_name}"
+
+    results_dir = Path(training_cfg["output_dir"])
+    results_dir = data_dir / results_dir
+    results_dir = results_dir / folder_name
+    results_dir.mkdir(parents=True, exist_ok=False)
+    env_config["output_dir"] = str(results_dir.expanduser().absolute())
+
+
 
     if len(baseline_shares) != env_config["N"]:
         raise ValueError("baseline_emission_shares length must match num_agents")
     if not np.isclose(baseline_shares.sum(), 1.0):
-        raise ValueError("baseline_emission_shares must sum to 1.0")
+        raise ValueError(f"baseline_emission_shares must sum to 1.0 but it sums to {baseline_shares.sum()}")
 
     emission_data = build_emission_data(em_data, baseline_shares, cicero_cfg["em_data_policy"])
 

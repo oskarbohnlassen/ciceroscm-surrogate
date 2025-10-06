@@ -52,10 +52,17 @@ class ClimateMarlExperiment:
         total_return = 0.0
         info_dict = {}
 
+        base_action = np.zeros(self.action_dim, dtype=np.int64)
+        if "energy" in self.lever_names:
+            energy_idx = self.lever_names.index("energy")
+            energy_levels = self.actions_config["lever_levels"]["energy"]
+            energy_choice = 2 if len(energy_levels) > 1 else 0
+            energy_choice = min(energy_choice, len(energy_levels) - 1)
+            base_action[energy_idx] = energy_choice
+
         while not done:
-            zero_action = np.zeros(self.action_dim, dtype=np.int64)
-            actions = {agent_id: zero_action.copy() for agent_id in obs.keys()}
-            step_log = {agent_id: zero_action.tolist() for agent_id in obs.keys()}
+            actions = {agent_id: base_action.copy() for agent_id in obs.keys()}
+            step_log = {agent_id: base_action.tolist() for agent_id in obs.keys()}
 
             trajectory.append(step_log)
             obs, rewards, terminated, truncated, info_dict = env.step(actions)
@@ -259,19 +266,8 @@ class ClimateMarlExperiment:
         base_config.seed = self.training_cfg.get("seed", 0)
         algo = base_config.build_algo()
 
-        timestamp = time.strftime("%Y%m%d_%H%M%S", time.localtime())
-        data_dir = Path(self.env_config["data_dir"])
-        if self.env_config['engine'] == 'net':
-            training_run_id = self.env_config['training_run_id']
-        else:
-            training_run_id = self.env_config['engine']
-        marl_run_name = self.env_config['run_name']
-        folder_name = f"{timestamp}_{training_run_id}_{marl_run_name}"
 
-        results_dir = Path(self.training_cfg["output_dir"])
-        results_dir = data_dir / results_dir
-        results_dir = results_dir / folder_name
-        results_dir.mkdir(parents=True, exist_ok=False)
+        results_dir = Path(self.env_config["output_dir"])
 
         with open(results_dir / "env_config.json", "w") as f:
             json.dump(_to_jsonable(self.env_config), f, indent=4)

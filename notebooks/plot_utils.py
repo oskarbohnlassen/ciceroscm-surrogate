@@ -298,6 +298,8 @@ def plot_train_reward(
     net_df: pd.DataFrame,
     steps_max: int = 200_000,
     cmap: str = "cividis",
+    y_min: float = None,
+    y_max: float = None,
 ):
     # Ensure numeric x
     scm = scm_df.copy(); net = net_df.copy()
@@ -326,6 +328,11 @@ def plot_train_reward(
     ax.set_title("Training reward per agent: SCM vs NET")
     ax.grid(True, linestyle=":", alpha=0.5)
     ax.set_xlim(0, steps_max)
+    if y_min is None:
+        y_min = min(scm.min().min(), net.min().min())
+    if y_max is None:
+        y_max = max(scm.max().max(), net.max().max())
+    ax.set_ylim(y_min, y_max)
     ticks = np.arange(0, steps_max + 1, 50_000)
     ax.set_xticks(ticks)
     ax.set_xticklabels(["0"] + [f"{t//1000}K" for t in ticks[1:]])
@@ -359,6 +366,94 @@ def _prep(df):
     df = df.copy()
     df.index = df.index.astype(int)
     return df.sort_index()
+
+
+def plot_lever_consistency(
+    lever_data,
+    agent_mask,
+    action_mask,
+    steps_max: int = 200_000,
+    cmap: str = "cividis",
+    savefig: str = None,
+):
+    """Plot lever usage for selected agents across SCM and NET runs."""
+
+    if not isinstance(lever_data, dict) or not lever_data:
+        raise ValueError("lever_data must map lever names to (scm_df, net_df)")
+
+    canonical_order = ["energy", "methane", "agriculture", "adaptation"]
+    lever_order = [name for name in canonical_order if name in lever_data]
+    if not lever_order:
+        raise ValueError("lever_data must contain at least one recognised lever")
+
+    action_mask = list(action_mask)
+    if len(action_mask) < len(lever_order):
+        action_mask += [0] * (len(lever_order) - len(action_mask))
+    selected_levers = [name for name, flag in zip(lever_order, action_mask) if flag]
+    if not selected_levers:
+        raise ValueError("action_mask selects no levers to plot")
+
+    first = selected_levers[0]
+    scm_df, net_df = lever_data[first]
+    if not isinstance(scm_df, pd.DataFrame) or not isinstance(net_df, pd.DataFrame):
+        raise TypeError("lever_data values must be (pd.DataFrame, pd.DataFrame)")
+    agent_cols = list(scm_df.columns)
+    if list(net_df.columns) != agent_cols:
+        raise ValueError("SCM and NET DataFrames must share identical agent columns")
+
+    agent_mask = list(agent_mask)
+    if len(agent_mask) < len(agent_cols):
+        agent_mask += [0] * (len(agent_cols) - len(agent_mask))
+    selected_agents = [col for col, flag in zip(agent_cols, agent_mask) if flag]
+    if not selected_agents:
+        raise ValueError("agent_mask selects no agents to plot")
+
+    cmap_obj = plt.get_cmap(cmap)
+    colors = [cmap_obj(x) for x in np.linspace(0.15, 0.85, len(selected_agents))]
+
+    def _prep_action(df: pd.DataFrame) -> pd.DataFrame:
+        out = df.copy()
+        out.index = out.index.astype(int)
+        out = out.sort_index()
+        return out[selected_agents]
+
+    n_rows = len(selected_levers)
+    fig, axes = plt.subplots(n_rows, 1, figsize=(8, 3 * n_rows), sharex=True)
+    if n_rows == 1:
+        axes = [axes]
+
+    for ax, lever in zip(axes, selected_levers):
+        scm_df, net_df = lever_data[lever]
+        scm_use, net_use = _prep_action(scm_df), _prep_action(net_df)
+
+        scm_handles, net_handles = [], []
+        for color, agent in zip(colors, selected_agents):
+            (h1,) = ax.plot(scm_use.index, scm_use[agent], color=color, linewidth=2.0, alpha=0.85)
+            (h2,) = ax.plot(net_use.index, net_use[agent], color=color, linewidth=2.0, linestyle="--", alpha=0.9)
+            scm_handles.append(h1)
+            net_handles.append(h2)
+
+        ax.set_ylabel(f"{lever.title()} (fraction)", fontsize=12)
+        ax.grid(True, linestyle=":", alpha=0.5)
+    _legend_pair(ax, scm_handles, net_handles, selected_agents)
+
+    xmax = int(steps_max)
+    for ax in axes:
+        ax.set_xlim(0, xmax)
+        ticks = np.arange(0, xmax + 1, 50_000)
+        ax.set_xticks(ticks)
+        if len(ticks):
+            ax.set_xticklabels(["0"] + [f"{t // 1000}K" for t in ticks[1:]], fontsize=11)
+        ax.margins(x=0)
+
+    axes[-1].set_xlabel("Environment steps", fontsize=12)
+    plt.tight_layout()
+
+    if savefig:
+        plt.savefig(savefig, dpi=300, bbox_inches="tight")
+
+    return fig, axes
+
 
 def _legend_pair(ax, left_handles, right_handles, labels, loc_left=(0.62,0.5), loc_right=(1,0.5)):
     leg1 = ax.legend(left_handles, labels, title="CICERO-SCM", frameon=True,
@@ -473,3 +568,148 @@ def plot_schematic(end_year, save_path):
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
     plt.savefig(save_path, dpi=300, bbox_inches="tight")
     plt.show()
+
+
+
+def _extract_lever_table(greedy_policy, lever_name):
+    rows = {}
+    for step_key, countries in greedy_policy.items():
+        row = {}
+        for country, metrics in countries.items():
+            series = metrics["lever_effort_fraction"].get(lever_name, [])
+            row[country] = _mean_safe(series)
+        rows[int(step_key)] = row
+    return pd.DataFrame.from_dict(rows, orient="index").sort_index()
+
+def _extract_adaptation_table(greedy_policy):
+    rows = {}
+    for step_key, countries in greedy_policy.items():
+        row = {}
+        for country, metrics in countries.items():
+            series = metrics["adaptation_investment_fraction"]
+            row[country] = _mean_safe(series)
+        rows[int(step_key)] = row
+    return pd.DataFrame.from_dict(rows, orient="index").sort_index()
+
+
+
+def plot_lever_consistency_mean(
+    lever_data: dict,
+    agent_mask,
+    action_mask,
+    steps_max: int = 200_000,
+    cmap: str = "cividis",
+    smooth_window: int | None = None,
+    savefig: str | None = None,
+):
+    """
+    Plot mean (across selected agents) lever effort for SCM vs NET on a single axis.
+
+    Parameters
+    ----------
+    lever_data : dict
+        Mapping {lever_name: (scm_df, net_df)}, where each df has index=steps and columns=agents.
+    agent_mask : iterable[int]
+        Binary mask aligned with agent columns selecting which agents to include in the mean.
+    action_mask : iterable[int]
+        Binary mask aligned with lever order selecting which levers to plot.
+    steps_max : int
+        X-axis max (environment steps).
+    cmap : str
+        Matplotlib colormap name for distinguishing levers.
+    smooth_window : int | None
+        If provided, apply a rolling mean with this window to the time series before plotting.
+    savefig : str | None
+        If provided, saves the figure to this path.
+
+    Returns
+    -------
+    (fig, ax)
+    """
+    if not isinstance(lever_data, dict) or not lever_data:
+        raise ValueError("lever_data must map lever names to (scm_df, net_df)")
+
+    # Canonical lever order and selection
+    canonical_order = ["energy", "methane", "agriculture", "adaptation"]
+    lever_order = [name for name in canonical_order if name in lever_data]
+    if not lever_order:
+        raise ValueError("lever_data must contain at least one recognised lever")
+
+    action_mask = list(action_mask)
+    if len(action_mask) < len(lever_order):
+        action_mask += [0] * (len(lever_order) - len(action_mask))
+    selected_levers = [name for name, flag in zip(lever_order, action_mask) if flag]
+    if not selected_levers:
+        raise ValueError("action_mask selects no levers to plot")
+
+    # Infer agent columns from the first lever, and validate SCM/NET shapes
+    first = selected_levers[0]
+    scm_df0, net_df0 = lever_data[first]
+    if not isinstance(scm_df0, pd.DataFrame) or not isinstance(net_df0, pd.DataFrame):
+        raise TypeError("lever_data values must be (pd.DataFrame, pd.DataFrame)")
+    agent_cols = list(scm_df0.columns)
+    if list(net_df0.columns) != agent_cols:
+        raise ValueError("SCM and NET DataFrames must share identical agent columns")
+
+    # Agent selection
+    agent_mask = list(agent_mask)
+    if len(agent_mask) < len(agent_cols):
+        agent_mask += [0] * (len(agent_cols) - len(agent_mask))
+    selected_agents = [col for col, flag in zip(agent_cols, agent_mask) if flag]
+    if not selected_agents:
+        raise ValueError("agent_mask selects no agents to plot")
+
+    def _prep(df: pd.DataFrame) -> pd.Series:
+        s = df.copy()
+        s.index = s.index.astype(int)
+        s = s.sort_index()
+        s = s[selected_agents].mean(axis=1)
+        if smooth_window and smooth_window > 1:
+            s = s.rolling(smooth_window, min_periods=1).mean()
+        return s
+
+    # Colors per lever
+    cmap_obj = plt.get_cmap(cmap)
+    colors = {lev: cmap_obj(x) for lev, x in zip(selected_levers, np.linspace(0.15, 0.85, len(selected_levers)))}
+
+    fig, ax = plt.subplots(figsize=(9, 4.8))
+
+    handles = []
+    labels = []
+
+    for lev in selected_levers:
+        scm_df, net_df = lever_data[lev]
+        scm_mean = _prep(scm_df)
+        net_mean = _prep(net_df)
+
+        # Plot SCM (solid)
+        h1, = ax.plot(scm_mean.index, scm_mean.values,
+                      color=colors[lev], lw=2.2, alpha=0.9)
+        # Plot NET (dashed)
+        h2, = ax.plot(net_mean.index, net_mean.values,
+                      color=colors[lev], lw=2.2, ls="--", alpha=0.95)
+
+        handles.extend([h1, h2])
+        labels.extend([f"{lev.title()} — SCM", f"{lev.title()} — NET"])
+
+    # Axes cosmetics
+    ax.set_xlabel("Environment steps", fontsize=14)
+    ax.set_ylabel("Mean effort (fraction)", fontsize=14)
+    ax.grid(True, linestyle=":", alpha=0.5)
+
+    # X ticks as 0, 50K, 100K, ...
+    xmax = int(steps_max)
+    ax.set_xlim(0, xmax)
+    ticks = np.arange(0, xmax + 1, 50_000)
+    ax.set_xticks(ticks)
+    if len(ticks):
+        ax.set_xticklabels(["0"] + [f"{t//1000}K" for t in ticks[1:]])
+
+    # Single legend (compact, multi-column)
+    ax.legend(handles, labels, ncol=2, frameon=True, loc="upper left")
+
+    plt.tight_layout()
+    if savefig:
+        plt.savefig(savefig, dpi=300, bbox_inches="tight")
+
+    return fig, ax
