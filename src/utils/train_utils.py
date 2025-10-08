@@ -2,7 +2,7 @@ from sklearn.metrics import mean_squared_error, r2_score
 import numpy as np
 import torch
 
-def validation_metrics(loader, model, device):
+def validation_metrics(loader, model, device, return_predictions: bool = False):
     y_true, y_pred = [], []
     with torch.no_grad():
         for xb, yb in loader:
@@ -15,4 +15,6 @@ def validation_metrics(loader, model, device):
 
     rmse = np.sqrt(mean_squared_error(y_true, y_pred))
     r2 = r2_score(y_true, y_pred)
+    if return_predictions:
+        return {"RMSE": rmse, "R2": r2}, y_true, y_pred
     return {"RMSE": rmse, "R2": r2}

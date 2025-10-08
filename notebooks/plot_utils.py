@@ -49,7 +49,14 @@ def plot_emission_ensemble(em_data, scenarios, gas, start_year=2000, n_sample=80
         plt.savefig(save_path, dpi=300, bbox_inches="tight")
     plt.show()
 
-def plot_temperature_ensemble(results, baseline_result, start_year=2000, n_sample=80, save_name=None, random_seed=0):
+def plot_temperature_ensemble(
+    results, 
+    baseline_result, 
+    start_year=2000, 
+    n_sample=80, 
+    save_name=None, 
+    random_seed=0
+):
     """
     Plot baseline temperature trajectory with scenario ensemble (5–95% band + spaghetti).
     Robust to year columns being str or int.
@@ -67,8 +74,7 @@ def plot_temperature_ensemble(results, baseline_result, start_year=2000, n_sampl
                 ys.append(int(c))
         return sorted(set(ys))
 
-    # Extract a 1D numpy array from a DataFrame/Series row for the given years,
-    # accepting either int or str column labels.
+    # Extract a 1D numpy array from a DataFrame/Series row for the given years
     def _row_year_values(row_like, years_int):
         idx = row_like.index
         cols = []
@@ -78,7 +84,6 @@ def plot_temperature_ensemble(results, baseline_result, start_year=2000, n_sampl
             elif str(y) in idx:
                 cols.append(str(y))
             else:
-                # year column missing: skip or raise; here we raise for clarity
                 raise KeyError(f"Year {y} not found in columns (int or str).")
         return row_like[cols].to_numpy(dtype=float)
 
@@ -113,26 +118,41 @@ def plot_temperature_ensemble(results, baseline_result, start_year=2000, n_sampl
     rng = np.random.default_rng(random_seed)
     samp = np.arange(S) if S <= n_sample else rng.choice(S, size=n_sample, replace=False)
 
-    # 5) Plot (style matched to emissions figures)
+    # 5) Plot
     plt.figure(figsize=(12, 6))
-    plt.plot(years, M[:, samp], color="#999999", lw=0.8, alpha=0.3, zorder=1)     # spaghetti
-    plt.fill_between(years, q5, q95, color="#a6cee3", alpha=0.35, label="5–95% percentile", zorder=2)
-    plt.plot(years, baseline_series, color="#247ab3", lw=2.2, label="SSP2-4.5 baseline scenario", zorder=3)
+    # Spaghetti ensemble
+    plt.plot(years, M[:, samp], color="#999999", lw=0.8, alpha=0.3, zorder=1)
+    # Percentile band
+    plt.fill_between(years, q5, q95, color="#a6cee3", alpha=0.35, zorder=2)
+    # Baseline
+    plt.plot(years, baseline_series, color="#247ab3", lw=2.2, zorder=3)
+    # Policy start
     if start_year <= 2015 <= years.max():
-        plt.axvline(2015, color="#28e008", lw=1, ls="--", label="Policy start (2015)", zorder=4, alpha=0.7)
+        plt.axvline(2015, color="#28e008", lw=1, ls="--", zorder=4, alpha=0.7)
 
-    plt.xlabel("Year", fontsize = 18)
-    plt.ylabel(f"Global Mean Surface Air Temperature ({unit})", fontsize = 18)
-    plt.legend(frameon=True, loc="upper left", fontsize = 16)
-    plt.xticks(fontsize = 16)
-    #plt.xticks(np.arange(years.min(), years.max()+1, 5), fontsize = 16)
-    plt.yticks(fontsize = 16)
+    # --- Legend handles ---
+    line_ens = plt.Line2D([], [], color="#999999", lw=1.0, alpha=0.6, label="Scenario ensemble")
+    band = plt.Line2D([], [], color="#a6cee3", lw=6, alpha=0.35, label="5–95% percentile")
+    line_base = plt.Line2D([], [], color="#247ab3", lw=2.2, label="SSP2-4.5 baseline scenario")
+    line_policy = plt.Line2D([], [], color="#28e008", lw=1, ls="--", label="Policy start (2015)")
+
+    plt.legend(
+        handles=[line_ens, band, line_base, line_policy],
+        frameon=True, loc="upper left", fontsize=16
+    )
+
+    plt.xlabel("Year", fontsize=20)
+    plt.ylabel(f"Global Mean Surface Air Temperature ({unit})", fontsize=20)
+    plt.xticks(fontsize=18)
+    plt.yticks(fontsize=18)
     plt.tight_layout()
 
     if save_name:
         os.makedirs("plots", exist_ok=True)
         plt.savefig(os.path.join("plots", save_name), dpi=300, bbox_inches="tight")
     plt.show()
+
+
 
 def plot_temperature_sequences(
     y_true, 
@@ -141,7 +161,8 @@ def plot_temperature_sequences(
     n_samples=3, 
     seed=0, 
     years=None, 
-    savepath=None
+    savepath=None,
+    surrogate_name = None
 ):
     """
     Reshape flat arrays (N,) -> (num_seq, seq_len), sample n sequences,
@@ -167,18 +188,26 @@ def plot_temperature_sequences(
         x = years
 
     # Plot
-    plt.figure(figsize=(6, 3))
+    plt.figure(figsize=(16, 8))
     cmap = plt.get_cmap("ocean")
-    for i, k in enumerate(idx):
-        col = cmap(i)
-        plt.plot(x, Y_true[k], color=col, lw=2.0, alpha = 0.5, label=f"S{i+1} — True")
-        plt.plot(x, Y_pred[k], color=col, lw=1.6, ls="--", label=f"S{i+1} — Pred")
+    color = "lightblue"
 
-    plt.xlabel("Year", fontsize = 14)
-    plt.ylabel("Air Temperature Change (°K)", fontsize = 14)
-    plt.legend(frameon=True, fontsize=12, ncol=3, loc = "upper left")
-    plt.xticks(fontsize = 12)
-    plt.yticks(fontsize = 12)
+    for i, k in enumerate(idx):
+        plt.plot(x, Y_true[k], color=color, lw=2.0, alpha=0.5)
+        plt.plot(x, Y_pred[k], color=color, lw=1.6, ls="--", alpha=0.8)
+
+    if surrogate_name is None:
+        surrogate_name = "RNN-based surrogate"
+    # Dummy handles for legend
+    true_line = plt.Line2D([], [], color=color, lw=2.0, label="CICERO-SCM")
+    pred_line = plt.Line2D([], [], color=color, lw=1.6, ls="--", label=surrogate_name)
+
+    plt.legend(handles=[true_line, pred_line], frameon=True, fontsize=20, loc="upper left")
+
+    plt.xlabel("Year", fontsize=22)
+    plt.ylabel("Air Temperature Change (K)", fontsize=22)
+    plt.xticks(fontsize=20)
+    plt.yticks(fontsize=20)
     plt.tight_layout()
 
     if savepath:
