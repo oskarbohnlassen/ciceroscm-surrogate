@@ -3,7 +3,7 @@ speed_test:
   training_run: training_runs/20251002_081632_gru_128_1
   use_half: false
   autocast: false
-  max_samples: 100
+  max_samples: 10000
   warmup_steps: 10
   output_dir_name: speed_tests
-  include_cicero_latencies: False
+  include_cicero_latencies: True

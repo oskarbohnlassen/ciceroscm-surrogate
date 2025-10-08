@@ -1,4 +1,4 @@
 policy_consistency_test:
-  run_dir: /home/obola/repositories/cicero-scm-surrogate/data/20250930_223742/marl_results/20251003_165457_20251001_104419_lstm_128_1_homogenous_agents
-  n_samples: 20
+  run_dir: /home/obola/repositories/cicero-scm-surrogate/data/20250930_223742/marl_results/paper_accuracy_hetero_20251007_085957_20251006_125016_tcn_128_5_heterogenous_agents
+  n_samples: 1000
   random_seed: 42

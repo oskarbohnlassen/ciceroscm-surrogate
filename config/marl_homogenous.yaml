@@ -1,0 +1,82 @@
+marl:
+  general:
+    data_dir: /home/obola/repositories/cicero-scm-surrogate/data/20250930_223742
+    climate_engine: net
+    training_run_id: 20251006_125016_tcn_128_5
+    marl_run_name: homogenous_agents
+    log_episode_trajectories: False       # master ON/OFF switch
+    log_dir: marl_logs                # where to save .npz files (optional; set None to skip saving to disk)
+    surrogate_device: cuda
+    surrogate_autocast: false
+    surrogate_use_half: false
+    random_seed: 2
+  environment:
+    num_agents: 4
+    baseline_emission_shares: [0.25, 0.25, 0.25, 0.25]
+    horizon: 35
+    rollout_length: 15
+  economics:
+    costs:
+      climate_damage_costs: [100.0, 100.0, 100.0, 100.0]
+      energy_costs: [0.001, 0.001, 0.001, 0.001]
+      methane_costs: [10.0, 10.0, 10.0, 10.0]
+      agriculture_costs: [10.0, 10.0, 10.0, 10.0]
+      adaptation_costs: [10.0, 10.0, 10.0, 10.0]
+    prevention_decay: 0.95
+    max_prevention_benefit: 0
+  actions:
+    energy_levels: [0.0, 0.5, 1.0]
+    methane_levels: [0.0, 0.5, 1.0]
+    agri_levels: [0.0, 0.5, 1.0]
+    adaptation_levels: [0.0, 0.03, 0.08]
+    policy_matrix:
+      energy:
+        CO2_FF: -0.050
+        CH4: -0.005
+        N2O: -0.005
+        SO2: -0.050
+      methane:
+        CH4: -0.000
+      agriculture:
+        CO2_AFOLU: -0.000
+        CH4: -0.000
+        N2O: -0.000
+  training:
+    num_iterations: 100
+    greedy_eval_interval: 2
+    output_dir: marl_results
+    seed: 42
+    ppo:
+      framework: torch
+      model:
+        use_lstm: true
+        lstm_cell_size: 128
+        vf_share_layers: false
+      train_batch_multiplier: 8
+      minibatch_multiplier: 2
+      num_epochs: 5
+      gamma: 0.999
+      lr: 0.0002
+      lr_schedule:
+        - [0, 0.0002]
+        - [150000, 0.0001]
+        - [250000, 0.00005]
+        - [350000, 0.00003]
+        - [450000, 0.00001]
+      clip_param: 0.3
+      entropy_coeff: 0.03
+      entropy_coeff_schedule:
+        - [0, 0.03]
+        - [100000, 0.02]
+        - [150000, 0.01]
+        - [300000, 0.0005]
+        - [400000, 0.0001]
+        - [500000, 0.00001]
+      rollout:
+        num_env_runners: 1
+        num_envs_per_runner: 32
+        fragment_length: horizon
+        num_gpus_per_env_runner: 1
+        sample_timeout_s: 1200
+      resources:
+        num_gpus: 1

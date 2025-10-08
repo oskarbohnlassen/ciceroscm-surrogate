@@ -3,6 +3,7 @@ from pathlib import Path
 import numpy as np
 from sklearn.metrics import mean_squared_error, r2_score
 from tqdm import tqdm
+import time
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -87,12 +88,18 @@ def main():
     n_samples = marl_config["n_samples"]
     random_seed = marl_config["random_seed"]
 
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    policy_consistency_root = Path(run_dir) / "policy_consistency_check"
+    policy_consistency_root.mkdir(parents=True, exist_ok=True)
+
+    sample_run_dir = policy_consistency_root / f"{timestamp}_{n_samples}"
+    sample_run_dir.mkdir(parents=True, exist_ok=True)
+
     results = compute_scm_for_random_episodes(run_dir, n_samples=n_samples, seed=random_seed)
 
-    # Save the results in the run directory
-    out_path = Path(run_dir) / "policy_consistency_results.npy"
-    np.save(out_path, results)
-    print(f"Saved results for {len(results)} episodes to {out_path}")
+    output_path = sample_run_dir / "policy_consistency_results.npy"
+    np.save(output_path, results)
+    print(f"Saved results for {len(results)} episodes to {output_path}")
 
     # Compute global RMSE and R^2 across all samples
     T_net_all = np.concatenate([sample["T_net"] for sample in results])
@@ -102,6 +109,22 @@ def main():
     r2 = r2_score(T_net_all, T_scm_all)
     print(f"Global RMSE across {len(results)} episodes: {rmse:.6f} K")
     print(f"Global R^2 across {len(results)} episodes: {r2:.6f}")
+
+    summary_path = sample_run_dir / "summary.txt"
+    summary_path.write_text(
+        "\n".join(
+            [
+                f"timestamp: {timestamp}",
+                f"run_dir: {run_dir}",
+                f"requested_n_samples: {n_samples}",
+                f"actual_episodes: {len(results)}",
+                f"random_seed: {random_seed}",
+                f"rmse_K: {rmse:.6f}",
+                f"r2: {r2:.6f}",
+            ]
+        )
+    )
+    print(f"Wrote summary metrics to {summary_path}")
 
 if __name__ == "__main__":
     main()

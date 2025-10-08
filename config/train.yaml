@@ -2,9 +2,9 @@ general:
   data_id: /home/obola/repositories/cicero-scm-surrogate/data/20250930_223742
   device: cuda
 model:
-  model_type: tcn
+  model_type: gru
   hidden_dims: 128
-  num_layers: 5
+  num_layers: 1
   lr: 0.001
   weight_decay: 0.0001
   epochs: 250

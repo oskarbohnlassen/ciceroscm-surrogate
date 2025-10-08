@@ -190,8 +190,6 @@ def plot_temperature_sequences(
 def plot_training_time_and_speedup(
     homogenous_scm_training_time,
     homogenous_net_training_time,
-    heterogenous_scm_training_time,
-    heterogenous_net_training_time,
     cmap="ocean",
     savefig=None,
     xmax=None,
@@ -201,73 +199,64 @@ def plot_training_time_and_speedup(
     def _to_series(x, name):
         if isinstance(x, pd.DataFrame):
             s = x["value"].copy()
+        elif isinstance(x, pd.Series):
+            s = x.copy()
         else:
             s = pd.Series(x, copy=True)
         s.name = name
-        s.index = s.index.astype(int)
+        s.index = pd.Index(s.index).astype(int)
+        s = s.sort_index()
         return s
 
     # Coerce and align
-    s_h_scm  = _to_series(homogenous_scm_training_time,  "Homog-SCM")
-    s_h_net  = _to_series(homogenous_net_training_time,  "Homog-NET")
-    s_he_scm = _to_series(heterogenous_scm_training_time, "Hetero-SCM")
-    s_he_net = _to_series(heterogenous_net_training_time, "Hetero-NET")
+    s_h_scm = _to_series(homogenous_scm_training_time, "SCM (homog.)")
+    s_h_net = _to_series(homogenous_net_training_time, "NET (homog.)")
+    df = pd.concat([s_h_scm, s_h_net], axis=1).sort_index()
 
-    df = pd.concat([s_h_scm, s_h_net, s_he_scm, s_he_net], axis=1).sort_index()
+    # Speed-up (guard against divide-by-zero)
+    speedup = df["SCM (homog.)"] / df["NET (homog.)"]
+    speedup = speedup.replace([np.inf, -np.inf], np.nan)
 
-    # Speed-ups
-    speedup_homog  = df["Homog-SCM"]  / df["Homog-NET"]
-    speedup_hetero = df["Hetero-SCM"] / df["Hetero-NET"]
-
-    # Colors from cmap
+    # Colors
     cmap_obj = plt.get_cmap(cmap) if isinstance(cmap, str) else cmap
     c_scm = cmap_obj(0.2)
     c_net = cmap_obj(0.8)
 
-    # Build figure
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=figsize, sharex=True, height_ratios=[1.5, 1])
+    # Figure
+    fig, (ax1, ax2) = plt.subplots(
+        2, 1, figsize=figsize, sharex=True, height_ratios=[1.5, 1]
+    )
 
     # (1) Absolute training times (log)
-    ax1.plot(df.index, df["Homog-SCM"],  label="SCM (homog.)",   color=c_scm, linestyle="-", alpha=0.6)
-    ax1.plot(df.index, df["Hetero-SCM"], label="SCM (heterog.)", color=c_scm, linestyle="--", alpha=0.6)
-    ax1.plot(df.index, df["Homog-NET"],  label="NET (homog.)",   color=c_net, linestyle="-", alpha=0.6)
-    ax1.plot(df.index, df["Hetero-NET"], label="NET (heterog.)", color=c_net, linestyle="--", alpha=0.6)
+    ax1.plot(df.index, df["SCM (homog.)"], label="SCM (homog.)", color=c_scm, ls="-", alpha=0.8)
+    ax1.plot(df.index, df["NET (homog.)"], label="NET (homog.)", color=c_net, ls="-", alpha=0.8)
     ax1.set_yscale("log")
-    ax1.set_ylabel("Training time (s, log)", fontsize=14)
+    ax1.set_ylabel("Training time (s, log)", fontsize=16)
     ax1.grid(True, which="both", linestyle=":", alpha=0.5)
-    ax1.legend(fontsize=10, ncol=2, loc="lower right")
+    ax1.legend(fontsize=14, loc="lower right")
     ax1.tick_params(axis="y", labelsize=14)
 
-
     # (2) Relative speed-up
-    ax2.plot(speedup_homog.index,  speedup_homog.values,  label="Speed-up (homog.)",  color=c_scm, linestyle="-")
-    ax2.plot(speedup_hetero.index, speedup_hetero.values, label="Speed-up (heterog.)", color=c_scm, linestyle="--")
-    ax2.set_xlabel("Environment steps", fontsize=14)
-    ax2.set_ylabel("Speed-up (SCM / NET)", fontsize=14)
+    ax2.plot(speedup.index, speedup.values, label="Speed-up (SCM / NET)", color=c_scm, ls="-")
+    ax2.set_xlabel("Environment steps", fontsize=16)
+    ax2.set_ylabel("Speed-up (×)", fontsize=16)
     ax2.grid(True, linestyle=":", alpha=0.5)
-    ax2.legend(fontsize=10, loc="lower right")
+    ax2.legend(fontsize=14, loc="lower right")
     ax2.tick_params(axis="y", labelsize=14)
-
 
     # X axis limits and ticks
     xmin = int(df.index.min())
     auto_xmax = int(df.index.max())
-    if xmax is None:
-        xmax_use = auto_xmax
-    else:
-        xmax_use = int(xmax)
-        # Trim plotted range (optional; just limit view)
+    xmax_use = auto_xmax if xmax is None else int(xmax)
     ax2.set_xlim(xmin, xmax_use)
 
-    # Nice K ticks
-    # Choose about 6–8 ticks in range
+    # Nice K ticks (about 6–8 ticks)
     n_ticks = 7
     ticks = np.linspace(xmin, xmax_use, num=n_ticks, dtype=int)
     ax2.set_xticks(ticks)
     ax2.set_xticklabels([f"{t//1000}K" if t >= 1000 else str(t) for t in ticks], fontsize=12)
 
     plt.tight_layout()
-
     if savefig:
         plt.savefig(savefig, dpi=300, bbox_inches="tight")
 
@@ -293,73 +282,123 @@ def table_for(greedy_dict: dict, var: str) -> pd.DataFrame:
     return df.sort_index()
 
 
+from matplotlib.ticker import MaxNLocator, FuncFormatter
+
 def plot_train_reward(
-    scm_df: pd.DataFrame,
-    net_df: pd.DataFrame,
+    scm_df: pd.DataFrame | None = None,
+    net_df: pd.DataFrame | None = None,
     steps_max: int = 200_000,
     cmap: str = "cividis",
-    y_min: float = None,
-    y_max: float = None,
+    y_min: float | None = None,
+    y_max: float | None = None,
+    savefig: str | None = None,
 ):
-    # Ensure numeric x
-    scm = scm_df.copy(); net = net_df.copy()
-    scm.index = scm.index.astype(int); net.index = net.index.astype(int)
+    if scm_df is None and net_df is None:
+        raise ValueError("Provide at least one of scm_df or net_df.")
+    
+    def _steps_formatter(x, pos=None):
+        x = int(round(x))
+        if x >= 1_000_000:
+            v = x / 1_000_000
+            return f"{v:.1f}M".replace(".0M", "M")
+        if x >= 1000:
+            v = x / 1000
+            return f"{v:.0f}K"
+        return str(x)
 
-    # Common countries
-    countries = [c for c in scm.columns if c in net.columns]
-    scm = scm[countries].sort_index()
-    net = net[countries].sort_index()
+    # Normalize inputs and intersect columns if both provided
+    if scm_df is not None:
+        scm = scm_df.copy()
+        scm.index = scm.index.astype(int)
+    else:
+        scm = None
 
-    # Palette: one shade per country
+    if net_df is not None:
+        net = net_df.copy()
+        net.index = net.index.astype(int)
+    else:
+        net = None
+
+    if scm is not None and net is not None:
+        countries = [c for c in scm.columns if c in net.columns]
+        if not countries:
+            raise ValueError("SCM and NET share no common columns (agents).")
+        scm = scm[countries].sort_index()
+        net = net[countries].sort_index()
+    else:
+        # Only one DF: keep all its columns
+        one = scm if scm is not None else net
+        countries = list(one.columns)
+        one.sort_index(inplace=True)
+
+    # Colors
     cmap_obj = plt.get_cmap(cmap)
     colors = [cmap_obj(x) for x in np.linspace(0.15, 0.85, len(countries))]
 
     fig, ax = plt.subplots(figsize=(10, 6))
 
     scm_handles, net_handles = [], []
-    for i, country in enumerate(countries):
-        (h1,) = ax.plot(scm.index, scm[country], color=colors[i], linewidth=2.0, alpha=0.7)
-        (h2,) = ax.plot(net.index, net[country], color=colors[i], linewidth=2.0, linestyle="--")
-        scm_handles.append(h1); net_handles.append(h2)
+
+    # Plot SCM (solid)
+    if scm is not None:
+        for i, country in enumerate(countries):
+            (h1,) = ax.plot(scm.index, scm[country], color=colors[i], linewidth=2.0, alpha=0.7)
+            scm_handles.append(h1)
+
+    # Plot NET (dashed)
+    if net is not None:
+        for i, country in enumerate(countries):
+            (h2,) = ax.plot(net.index, net[country], color=colors[i], linewidth=2.0, linestyle="--")
+            net_handles.append(h2)
 
     # Axes cosmetics
-    ax.set_xlabel("Environment steps")
-    ax.set_ylabel("Training reward")
-    ax.set_title("Training reward per agent: SCM vs NET")
+    ax.set_xlabel("Environment steps", fontsize=16)
+    ax.set_ylabel("Training reward", fontsize=16)
     ax.grid(True, linestyle=":", alpha=0.5)
+
+    ax.tick_params(axis="x", labelsize=14)
+    ax.tick_params(axis="y", labelsize=14)
+
+    # X-limits
     ax.set_xlim(0, steps_max)
-    if y_min is None:
-        y_min = min(scm.min().min(), net.min().min())
-    if y_max is None:
-        y_max = max(scm.max().max(), net.max().max())
-    ax.set_ylim(y_min, y_max)
-    ticks = np.arange(0, steps_max + 1, 50_000)
-    ax.set_xticks(ticks)
-    ax.set_xticklabels(["0"] + [f"{t//1000}K" for t in ticks[1:]])
+    ax.xaxis.set_major_locator(MaxNLocator(nbins=7, integer=True))
+    ax.xaxis.set_major_formatter(FuncFormatter(_steps_formatter))
     ax.margins(x=0)
 
-    # --- Separate legends inside the plot ---
-    leg1 = ax.legend(
-        scm_handles,
-        countries,
-        title="SCM",
-        frameon=True,
-        loc="lower left",
-        bbox_to_anchor=(0.7, 0.02),
-    )
-    ax.add_artist(leg1)
+    # Y-limits
+    ymins, ymaxs = [], []
+    if scm is not None:
+        ymins.append(scm.min().min()); ymaxs.append(scm.max().max())
+    if net is not None:
+        ymins.append(net.min().min());  ymaxs.append(net.max().max())
+    if y_min is None: y_min = min(ymins)
+    if y_max is None: y_max = max(ymaxs)
+    ax.set_ylim(y_min, y_max)
 
-    leg2 = ax.legend(
-        net_handles,
-        countries,
-        title="NET",
-        frameon=True,
-        loc="lower right",
-        bbox_to_anchor=(0.99, 0.02),
-    )
+    # Legends
+    if scm is not None and net is not None:
+        leg1 = ax.legend(
+            scm_handles, countries, title="SCM",
+            frameon=True, loc="lower left", bbox_to_anchor=(0.59, 0.02), fontsize=14,
+        )
+        ax.add_artist(leg1)
+        ax.legend(
+            net_handles, countries, title="NET",
+            frameon=True, loc="lower right", bbox_to_anchor=(0.99, 0.02), fontsize=14,
+        )
+    else:
+        # Single legend
+        handles = scm_handles if scm is not None else net_handles
+        ax.legend(handles, countries, frameon=True, loc="lower right", fontsize=14)
 
     plt.tight_layout()
-    plt.show()
+    if savefig:
+        plt.savefig(savefig, dpi=300, bbox_inches="tight")
+        plt.show()
+    else:
+        plt.show()
+
+    return fig, ax
 
 
 def _prep(df):
@@ -599,32 +638,10 @@ def plot_lever_consistency_mean(
     action_mask,
     steps_max: int = 200_000,
     cmap: str = "cividis",
-    smooth_window: int | None = None,
     savefig: str | None = None,
 ):
     """
     Plot mean (across selected agents) lever effort for SCM vs NET on a single axis.
-
-    Parameters
-    ----------
-    lever_data : dict
-        Mapping {lever_name: (scm_df, net_df)}, where each df has index=steps and columns=agents.
-    agent_mask : iterable[int]
-        Binary mask aligned with agent columns selecting which agents to include in the mean.
-    action_mask : iterable[int]
-        Binary mask aligned with lever order selecting which levers to plot.
-    steps_max : int
-        X-axis max (environment steps).
-    cmap : str
-        Matplotlib colormap name for distinguishing levers.
-    smooth_window : int | None
-        If provided, apply a rolling mean with this window to the time series before plotting.
-    savefig : str | None
-        If provided, saves the figure to this path.
-
-    Returns
-    -------
-    (fig, ax)
     """
     if not isinstance(lever_data, dict) or not lever_data:
         raise ValueError("lever_data must map lever names to (scm_df, net_df)")
@@ -664,8 +681,6 @@ def plot_lever_consistency_mean(
         s.index = s.index.astype(int)
         s = s.sort_index()
         s = s[selected_agents].mean(axis=1)
-        if smooth_window and smooth_window > 1:
-            s = s.rolling(smooth_window, min_periods=1).mean()
         return s
 
     # Colors per lever
@@ -674,8 +689,8 @@ def plot_lever_consistency_mean(
 
     fig, ax = plt.subplots(figsize=(9, 4.8))
 
-    handles = []
-    labels = []
+    scm_handles, net_handles = [], []
+    scm_labels,  net_labels  = [], []
 
     for lev in selected_levers:
         scm_df, net_df = lever_data[lev]
@@ -689,8 +704,8 @@ def plot_lever_consistency_mean(
         h2, = ax.plot(net_mean.index, net_mean.values,
                       color=colors[lev], lw=2.2, ls="--", alpha=0.95)
 
-        handles.extend([h1, h2])
-        labels.extend([f"{lev.title()} — SCM", f"{lev.title()} — NET"])
+        scm_handles.append(h1); scm_labels.append(lev.title())
+        net_handles.append(h2); net_labels.append(lev.title())
 
     # Axes cosmetics
     ax.set_xlabel("Environment steps", fontsize=14)
@@ -704,12 +719,377 @@ def plot_lever_consistency_mean(
     ax.set_xticks(ticks)
     if len(ticks):
         ax.set_xticklabels(["0"] + [f"{t//1000}K" for t in ticks[1:]])
+    ax.margins(x=0)
 
-    # Single legend (compact, multi-column)
-    ax.legend(handles, labels, ncol=2, frameon=True, loc="upper left")
+    # --- Separate legends inside the plot (like plot_train_reward) ---
+    leg1 = ax.legend(
+        scm_handles, scm_labels,
+        title="SCM",
+        frameon=True,
+        loc="lower left",
+        bbox_to_anchor=(0.62, 0.02),  # tweak if overlapping
+    )
+    ax.add_artist(leg1)
+
+    leg2 = ax.legend(
+        net_handles, net_labels,
+        title="NET",
+        frameon=True,
+        loc="lower right",
+        bbox_to_anchor=(0.99, 0.02),
+    )
 
     plt.tight_layout()
     if savefig:
         plt.savefig(savefig, dpi=300, bbox_inches="tight")
 
     return fig, ax
+
+
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from matplotlib.ticker import MaxNLocator, FuncFormatter
+
+def plot_lever_consistency_mean(
+    lever_data: dict,
+    agent_mask,
+    action_mask,
+    steps_max: int = 200_000,
+    cmap: str = "cividis",
+    savefig: str | None = None,
+    figsize: tuple[float, float] = (9, 4.8),
+    y_min: float | None = None,
+    y_max: float | None = None,
+    primary_label: str = "SCM",
+):
+    """
+    Plot mean (across selected agents) lever effort for one or two engines on a single axis.
+
+    lever_data maps lever_name ->
+      - DataFrame (single engine), or
+      - (first_df, second_df) tuple (two engines; first legend titled `primary_label`, second "NET").
+
+    Each df: index = environment steps (ints), columns = agent names.
+    """
+    if not isinstance(lever_data, dict) or not lever_data:
+        raise ValueError("lever_data must be a non-empty dict")
+
+    # Canonical lever order and selection
+    canonical_order = ["energy", "methane", "agriculture", "adaptation"]
+    lever_order = [name for name in canonical_order if name in lever_data]
+    if not lever_order:
+        raise ValueError(f"lever_data must contain at least one recognised lever from {canonical_order}")
+
+    action_mask = list(action_mask)
+    if len(action_mask) < len(lever_order):
+        action_mask += [0] * (len(lever_order) - len(action_mask))
+    selected_levers = [name for name, flag in zip(lever_order, action_mask) if flag]
+    if not selected_levers:
+        raise ValueError("action_mask selects no levers to plot")
+
+    # Unpack helper: return (first_df or None, second_df or None)
+    def _unpack(val):
+        if isinstance(val, pd.DataFrame):
+            return (val, None)
+        if isinstance(val, (tuple, list)) and len(val) == 2:
+            return val[0], val[1]
+        raise TypeError("Each lever value must be a DataFrame, or a (first_df, second_df) tuple/list.")
+
+    # Determine agent columns from the first selected lever
+    first = selected_levers[0]
+    df1, df2 = _unpack(lever_data[first])
+    ref_df = df1 if isinstance(df1, pd.DataFrame) else df2
+    if not isinstance(ref_df, pd.DataFrame):
+        raise ValueError(f"No DataFrame found for lever '{first}'")
+    agent_cols = list(ref_df.columns)
+
+    # Agent selection
+    agent_mask = list(agent_mask)
+    if len(agent_mask) < len(agent_cols):
+        agent_mask += [0] * (len(agent_cols) - len(agent_mask))
+    selected_agents = [col for col, flag in zip(agent_cols, agent_mask) if flag]
+    if not selected_agents:
+        raise ValueError("agent_mask selects no agents to plot")
+
+    # Series prep: mean over selected agents, sorted integer index
+    def _prep(df: pd.DataFrame) -> pd.Series:
+        s = df.copy()
+        s.index = pd.Index(s.index).astype(int)
+        s = s.sort_index()
+        cols = [c for c in selected_agents if c in s.columns]
+        if not cols:
+            raise ValueError("Selected agents not present in a provided DataFrame.")
+        return s[cols].mean(axis=1)
+
+    # Colors per lever
+    cmap_obj = plt.get_cmap(cmap)
+    colors = {lev: cmap_obj(x) for lev, x in zip(selected_levers, np.linspace(0.15, 0.85, len(selected_levers)))}
+
+    fig, ax = plt.subplots(figsize=figsize)
+
+    first_handles, second_handles = [], []
+    first_labels,  second_labels  = [], []
+    any_first, any_second = False, False
+
+    ymins, ymaxs = [], []
+
+    for lev in selected_levers:
+        df_first, df_second = _unpack(lever_data[lev])
+
+        if isinstance(df_first, pd.DataFrame):
+            ser_first = _prep(df_first)
+            (h1,) = ax.plot(ser_first.index, ser_first.values,
+                            color=colors[lev], lw=2.2, alpha=0.9)
+            first_handles.append(h1); first_labels.append(lev.title())
+            ymins.append(ser_first.min()); ymaxs.append(ser_first.max())
+            any_first = True
+
+        if isinstance(df_second, pd.DataFrame):
+            ser_second = _prep(df_second)
+            (h2,) = ax.plot(ser_second.index, ser_second.values,
+                            color=colors[lev], lw=2.2, ls="--", alpha=0.95)
+            second_handles.append(h2); second_labels.append(lev.title())
+            ymins.append(ser_second.min()); ymaxs.append(ser_second.max())
+            any_second = True
+
+    # Axes cosmetics
+    ax.set_xlabel("Environment steps", fontsize=14)
+    ax.set_ylabel("Mean effort (fraction)", fontsize=14)
+    ax.grid(True, linestyle=":", alpha=0.5)
+
+    # X: limits and adaptive ticks (K/M)
+    ax.set_xlim(0, int(steps_max))
+    ax.xaxis.set_major_locator(MaxNLocator(nbins=7, integer=True))
+    ax.xaxis.set_major_formatter(FuncFormatter(
+        lambda x, pos=None: f"{x/1_000_000:.1f}M".replace(".0M", "M") if x >= 1_000_000
+        else (f"{int(x/1000)}K" if x >= 1000 else str(int(x)))
+    ))
+    ax.margins(x=0)
+    ax.tick_params(axis="x", labelsize=14)
+    ax.tick_params(axis="y", labelsize=14)
+
+    # Y limits
+    if y_min is None or y_max is None:
+        if ymins and ymaxs:
+            auto_ymin, auto_ymax = float(min(ymins)), float(max(ymaxs))
+            if y_min is None: y_min = auto_ymin
+            if y_max is None: y_max = auto_ymax
+    ax.set_ylim(y_min, y_max)
+
+    # Legends
+    if any_first and any_second:
+        leg1 = ax.legend(
+            first_handles, first_labels, title=primary_label,
+            frameon=True, loc="lower left", bbox_to_anchor=(0.53, 0.05), fontsize=14, title_fontsize=14,
+        )
+        ax.add_artist(leg1)
+        ax.legend(
+            second_handles, second_labels, title="NET",
+            frameon=True, loc="lower right", bbox_to_anchor=(1.00, 0.05), fontsize=14, title_fontsize=14,
+        )
+    else:
+        handles = first_handles if any_first else second_handles
+        labels  = first_labels  if any_first else second_labels
+        title   = primary_label
+        ax.legend(handles, labels, title=title, frameon=True, loc="lower right", fontsize=14, title_fontsize=14)
+
+    plt.tight_layout()
+    if savefig:
+        plt.savefig(savefig, dpi=300, bbox_inches="tight")
+    else:
+        plt.show()
+
+    return fig, ax
+
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from matplotlib.ticker import MaxNLocator, FuncFormatter
+
+def plot_lever_consistency(
+    lever_data: dict,
+    agent_mask,
+    action_mask,
+    steps_max: int = 200_000,
+    cmap: str = "cividis",
+    savefig: str | None = None,
+    figsize: tuple[float, float] | None = None,
+    y_min: float | None = None,
+    y_max: float | None = None,
+    max_legend_labels: int | None = 12,
+    primary_label: str = "SCM",
+):
+    """
+    Plot PER-AGENT lever usage for one or two engines, one subplot per lever.
+
+    lever_data maps lever_name ->
+      - DataFrame (single engine), or
+      - (first_df, second_df) tuple (two engines; first legend titled `primary_label`, second "NET").
+
+    Each df: index = environment steps (ints), columns = agent names.
+    """
+    if not isinstance(lever_data, dict) or not lever_data:
+        raise ValueError("lever_data must be a non-empty dict")
+
+    # Canonical lever order and selection
+    canonical_order = ["energy", "methane", "agriculture", "adaptation"]
+    lever_order = [name for name in canonical_order if name in lever_data]
+    if not lever_order:
+        raise ValueError(f"lever_data must contain at least one recognised lever from {canonical_order}")
+
+    action_mask = list(action_mask)
+    if len(action_mask) < len(lever_order):
+        action_mask += [0] * (len(lever_order) - len(action_mask))
+    selected_levers = [name for name, flag in zip(lever_order, action_mask) if flag]
+    if not selected_levers:
+        raise ValueError("action_mask selects no levers to plot")
+
+    # Unpack helper: return (first_df or None, second_df or None)
+    def _unpack(val):
+        if isinstance(val, pd.DataFrame):
+            return (val, None)
+        if isinstance(val, (tuple, list)) and len(val) == 2:
+            return val[0], val[1]
+        raise TypeError("Each lever value must be a DataFrame, or a (first_df, second_df) tuple/list.")
+
+    # Determine agent columns from the first selected lever
+    df1, df2 = _unpack(lever_data[selected_levers[0]])
+    ref_df = df1 if isinstance(df1, pd.DataFrame) else df2
+    if not isinstance(ref_df, pd.DataFrame):
+        raise ValueError(f"No DataFrame found for lever '{selected_levers[0]}'")
+    agent_cols = list(ref_df.columns)
+
+    # Agent selection
+    agent_mask = list(agent_mask)
+    if len(agent_mask) < len(agent_cols):
+        agent_mask += [0] * (len(agent_cols) - len(agent_mask))
+    selected_agents = [col for col, flag in zip(agent_cols, agent_mask) if flag]
+    if not selected_agents:
+        raise ValueError("agent_mask selects no agents to plot")
+
+    # Prep helper: returns df with selected agents, sorted integer index
+    def _prep(df: pd.DataFrame) -> pd.DataFrame:
+        out = df.copy()
+        out.index = pd.Index(out.index).astype(int)
+        out = out.sort_index()
+        cols = [c for c in selected_agents if c in out.columns]
+        if not cols:
+            raise ValueError("Selected agents not present in a provided DataFrame.")
+        return out[cols]
+
+    # Colors: one per agent (consistent across subplots)
+    cmap_obj = plt.get_cmap(cmap)
+    colors = {agent: cmap_obj(x) for agent, x in zip(selected_agents,
+                                                     np.linspace(0.15, 0.85, len(selected_agents)))}
+
+    n_rows = len(selected_levers)
+    if figsize is None:
+        figsize = (12.0, max(5, 3.5 * n_rows))  # scale with number of levers
+
+    fig, axes = plt.subplots(n_rows, 1, figsize=figsize, sharex=True)
+    if n_rows == 1:
+        axes = [axes]
+
+    # For Y autoscale (per panel if user doesn't fix)
+    panel_ymins, panel_ymaxs = [], []
+
+    for ax, lever in zip(axes, selected_levers):
+        df_first, df_second = _unpack(lever_data[lever])
+        any_first = isinstance(df_first, pd.DataFrame)
+        any_second = isinstance(df_second, pd.DataFrame)
+
+        if any_first:
+            data_first = _prep(df_first)
+        if any_second:
+            data_second = _prep(df_second)
+
+        first_pairs, second_pairs = [], []
+
+        for agent in selected_agents:
+            if any_first:
+                (h1,) = ax.plot(data_first.index, data_first[agent], color=colors[agent], lw=2.0, alpha=0.85)
+                first_pairs.append((h1, agent))
+            if any_second:
+                (h2,) = ax.plot(data_second.index, data_second[agent], color=colors[agent], lw=2.0, ls="--", alpha=0.9)
+                second_pairs.append((h2, agent))
+
+        # y-range collection
+        yvals = []
+        if any_first:
+            yvals.extend([data_first[agent].min() for agent in selected_agents])
+            yvals.extend([data_first[agent].max() for agent in selected_agents])
+        if any_second:
+            yvals.extend([data_second[agent].min() for agent in selected_agents])
+            yvals.extend([data_second[agent].max() for agent in selected_agents])
+        if yvals:
+            panel_ymins.append(min(yvals)); panel_ymaxs.append(max(yvals))
+
+        ax.set_ylabel(f"{lever.title()} (fraction)", fontsize=14)
+        ax.grid(True, linestyle=":", alpha=0.5)
+        ax.tick_params(axis="x", labelsize=14)
+        ax.tick_params(axis="y", labelsize=14)
+
+        # Legend helpers
+        def _truncate(pairs, maxn):
+            if maxn is None or len(pairs) <= maxn:
+                return pairs
+            shown = pairs[:maxn]
+            # add "+N more" dummy
+            dummy = plt.Line2D([], [], color='none')
+            shown.append((dummy, f"+{len(pairs)-maxn} more"))
+            return shown
+
+        if any_first and any_second:
+            pairs1 = _truncate(first_pairs,  max_legend_labels)
+            pairs2 = _truncate(second_pairs, max_legend_labels)
+
+            leg1 = ax.legend([h for h, _ in pairs1],
+                             [lab for _, lab in pairs1],
+                             title=primary_label, frameon=True,
+                             loc="lower left", bbox_to_anchor=(0.67, 0.05),
+                             fontsize=14, title_fontsize=14)
+            ax.add_artist(leg1)
+            ax.legend([h for h, _ in pairs2],
+                      [lab for _, lab in pairs2],
+                      title="NET", frameon=True,
+                      loc="lower right", bbox_to_anchor=(1.00, 0.05),
+                      fontsize=14, title_fontsize=14)
+        else:
+            pairs = first_pairs if any_first else second_pairs
+            pairs = _truncate(pairs, max_legend_labels)
+            ax.legend([h for h, _ in pairs],
+                      [lab for _, lab in pairs],
+                      title=primary_label, frameon=True,
+                      loc="lower right", fontsize=14, title_fontsize=14)
+
+    # X axis formatting
+    for ax in axes:
+        ax.set_xlim(0, int(steps_max))
+        ax.xaxis.set_major_locator(MaxNLocator(nbins=7, integer=True))
+        ax.xaxis.set_major_formatter(FuncFormatter(
+            lambda x, pos=None: f"{x/1_000_000:.1f}M".replace(".0M", "M") if x >= 1_000_000
+            else (f"{int(x/1000)}K" if x >= 1000 else str(int(x)))
+        ))
+        ax.margins(x=0)
+
+    axes[-1].set_xlabel("Environment steps", fontsize=14)
+
+    # Y limits
+    if y_min is not None and y_max is not None:
+        for ax in axes:
+            ax.set_ylim(y_min, y_max)
+    else:
+        for ax, ymin, ymax in zip(axes, panel_ymins, panel_ymaxs):
+            ax.set_ylim(y_min if y_min is not None else ymin,
+                        y_max if y_max is not None else ymax)
+
+    plt.tight_layout()
+    if savefig:
+        plt.savefig(savefig, dpi=300, bbox_inches="tight")
+    else:
+        plt.show()
+
+    return fig, axes

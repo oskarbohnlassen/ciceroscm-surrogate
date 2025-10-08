@@ -1,4 +1,4 @@
 surrogate_test:
   data_dir: /home/obola/repositories/cicero-scm-surrogate/data/20250930_223742
-  model_dir: /home/obola/repositories/cicero-scm-surrogate/data/20250930_223742/training_runs/20251002_081632_gru_128_1
+  model_dir: /home/obola/repositories/cicero-scm-surrogate/data/20250930_223742/training_runs/20251006_125016_tcn_128_5
   
