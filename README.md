@@ -6,7 +6,7 @@ This repository hosts the surrogate modelling experiments that couple a multi-ag
 - `src/`: source code for data generation, data processing, surrogate model, MARL environment wrappers, and training/analysis scripts.
 - `ciceroscm/`: upstream CICERO SCM source, bundled here for convenience.
 - `config/`: example experiment and training configurations.
-- `notebooks/`: exploratory analysis and plotting utilities.
+- `notebooks/`: analysis of results and plotting utilities.
 - `data/`: placeholders for input data and generated artefacts (not versioned in full because of size).
 
 ## Installation
