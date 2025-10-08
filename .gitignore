@@ -1,8 +1,14 @@
-data/*
+data/20250930_223742/marl_results/*
+data/20250930_223742/processed/*
+data/20250930_223742/raw/*
+data/20250930_223742/training_runs/*
+
 notebooks/lightning_logs
 notebooks/__pycache__
+notebooks/plots/*
+
 src/__pycache__
 marl_results/*
 notebooks/plots
 
-old
+old/*

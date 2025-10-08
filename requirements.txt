@@ -1,0 +1,17 @@
+cx_Freeze==8.4.1
+gymnasium==1.1.1
+matplotlib==3.10.6
+numpy==2.3.3
+pandas==2.3.3
+py2exe==0.14.0.0
+pytest==8.4.1
+PyYAML==6.0.2
+PyYAML==6.0.3
+ray==2.49.1
+Requests==2.32.5
+scikit_learn==1.7.2
+scipy==1.16.2
+setuptools==80.9.0
+torch==2.7.1+cu128
+tqdm==4.67.1
+xarray==2025.10.1
