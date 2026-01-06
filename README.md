@@ -1,6 +1,6 @@
 # CICERO-SCM Surrogate
 
-This repository hosts the surrogate modelling experiments that couple a multi-agent reinforcement learning setup with the CICERO simple climate model (SCM). We provide training scripts, data processing utilities, and exploratory notebooks that reproduce the surrogate analysis used in the accompanying paper submitted for AAMAS 2026.
+This repository hosts the surrogate modelling experiments that couple a multi-agent reinforcement learning setup with the CICERO simple climate model (SCM). We provide training scripts, data processing utilities, and exploratory notebooks that reproduce the surrogate analysis used in the accompanying paper accepted for AAMAS 2026.
 
 ## Repository Layout
 - `src/`: source code for data generation, data processing, surrogate model, MARL environment wrappers, and training/analysis scripts.
